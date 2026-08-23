@@ -1,11 +1,410 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>My Website</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sandeep Halder — Principal Software Engineer, AI Infrastructure</title>
+<meta name="description" content="Sandeep Halder — Principal Software Engineer at Dell R&D, building agentic AI and Graph RAG systems for enterprise engineering workflows.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2312645A'/%3E%3Ccircle cx='10' cy='11' r='2.6' fill='%23F1F2ED'/%3E%3Ccircle cx='22' cy='10' r='2.6' fill='%23F1F2ED'/%3E%3Ccircle cx='16' cy='22' r='2.6' fill='%23F1F2ED'/%3E%3Cpath d='M10 11L22 10M10 11L16 22M22 10L16 22' stroke='%23F1F2ED' stroke-width='1.3'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg: #F1F2ED;
+    --surface: #FFFFFF;
+    --ink: #17211C;
+    --ink-muted: #4B564F;
+    --rule: #D8DBD2;
+    --accent: #12645A;
+    --accent-strong: #0B4A42;
+    --accent-soft: #E4EEEC;
+    --gold: #A6752B;
+    --shadow: rgba(23,33,28,0.06);
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg: #0E1512;
+      --surface: #131C18;
+      --ink: #E9ECE7;
+      --ink-muted: #9AA79E;
+      --rule: #263229;
+      --accent: #55C4B3;
+      --accent-strong: #8CE0D2;
+      --accent-soft: #16241F;
+      --gold: #E0A94F;
+      --shadow: rgba(0,0,0,0.35);
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg: #0E1512;
+    --surface: #131C18;
+    --ink: #E9ECE7;
+    --ink-muted: #9AA79E;
+    --rule: #263229;
+    --accent: #55C4B3;
+    --accent-strong: #8CE0D2;
+    --accent-soft: #16241F;
+    --gold: #E0A94F;
+    --shadow: rgba(0,0,0,0.35);
+  }
+
+  *{ box-sizing: border-box; }
+  html{ color-scheme: light dark; }
+  body{
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: 'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif;
+    font-size: 17px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  a{ color: var(--accent-strong); text-decoration-thickness: 1.5px; text-underline-offset: 3px; }
+  a:hover{ color: var(--accent); }
+  a:focus-visible, button:focus-visible{ outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 3px; }
+
+  .wrap{ max-width: 760px; margin: 0 auto; padding: 0 24px; }
+
+  .eyebrow{
+    font-family: 'IBM Plex Mono', ui-monospace, monospace;
+    font-size: 12.5px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--accent-strong);
+    margin: 0 0 14px;
+  }
+
+  h1, h2{ font-family: 'Fraunces', Georgia, serif; text-wrap: balance; margin: 0; }
+
+  /* theme toggle */
+  .toggle{
+    position: fixed; top: 20px; right: 20px;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    color: var(--ink-muted);
+    padding: 7px 12px;
+    border-radius: 20px;
+    cursor: pointer;
+    box-shadow: 0 2px 8px var(--shadow);
+    z-index: 10;
+  }
+  .toggle:hover{ color: var(--ink); }
+
+  /* hero */
+  .hero{
+    position: relative;
+    padding: 96px 0 64px;
+    overflow: hidden;
+  }
+  .hero-graph{
+    position: absolute;
+    top: -40px; right: -60px;
+    width: 420px; height: 420px;
+    opacity: 0.5;
+    pointer-events: none;
+  }
+  .hero-graph circle{ fill: var(--accent); }
+  .hero-graph line{ stroke: var(--accent); stroke-width: 1; opacity: 0.55; }
+  .hero-content{ position: relative; }
+  .hero h1{
+    font-size: clamp(2.4rem, 6vw, 3.6rem);
+    font-weight: 600;
+    line-height: 1.05;
+    font-optical-sizing: auto;
+  }
+  .hero .role{
+    font-size: clamp(1.05rem, 2.4vw, 1.25rem);
+    color: var(--ink-muted);
+    margin: 14px 0 22px;
+    max-width: 46ch;
+  }
+  .chips{ display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 28px; }
+  .chip{
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12.5px;
+    padding: 5px 11px;
+    border-radius: 20px;
+    background: var(--accent-soft);
+    color: var(--accent-strong);
+    border: 1px solid transparent;
+    white-space: nowrap;
+  }
+  .chip.plain{ background: transparent; border-color: var(--rule); color: var(--ink-muted); }
+
+  .contact-row{ display: flex; flex-wrap: wrap; gap: 18px; align-items: center; font-size: 15px; }
+  .contact-row .sep{ color: var(--rule); }
+
+  section{ padding: 44px 0; border-top: 1px solid var(--rule); }
+  section > p{ color: var(--ink-muted); max-width: 62ch; }
+
+  /* impact cards */
+  .impact-grid{ display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 18px; }
+  @media (max-width: 620px){ .impact-grid{ grid-template-columns: 1fr; } }
+  .impact-card{
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--accent);
+    border-radius: 6px;
+    padding: 16px 18px;
+    box-shadow: 0 1px 3px var(--shadow);
+  }
+  .impact-card h3{
+    font-family: 'IBM Plex Sans', sans-serif;
+    font-size: 15px;
+    font-weight: 600;
+    margin: 0 0 6px;
+  }
+  .impact-card p{ margin: 0; font-size: 14.5px; color: var(--ink-muted); }
+
+  /* stack */
+  .stack-group{ margin-top: 20px; }
+  .stack-group h3{
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-muted);
+    margin: 0 0 10px;
+    font-weight: 500;
+  }
+
+  /* timeline */
+  .timeline{ margin-top: 24px; position: relative; }
+  .timeline::before{
+    content: ""; position: absolute; left: 5px; top: 6px; bottom: 6px;
+    width: 1.5px; background: var(--rule);
+  }
+  .t-item{ position: relative; padding-left: 30px; margin-bottom: 26px; }
+  .t-item:last-child{ margin-bottom: 0; }
+  .t-item::before{
+    content: ""; position: absolute; left: 0; top: 5px;
+    width: 11px; height: 11px; border-radius: 50%;
+    background: var(--surface); border: 2px solid var(--accent);
+  }
+  .t-period{
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12.5px;
+    color: var(--accent-strong);
+    font-variant-numeric: tabular-nums;
+    display: block;
+    margin-bottom: 3px;
+  }
+  .t-role{ font-weight: 600; }
+  .t-org{ color: var(--ink-muted); font-size: 15px; }
+
+  .edu-list{ list-style: none; padding: 0; margin: 20px 0 0; }
+  .edu-list li{ padding: 10px 0; border-bottom: 1px solid var(--rule); display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  .edu-list li:last-child{ border-bottom: none; }
+  .edu-degree{ font-weight: 600; }
+  .edu-school{ color: var(--ink-muted); font-size: 14.5px; }
+
+  footer{ padding: 48px 0 72px; border-top: 1px solid var(--rule); }
+  footer p{ color: var(--ink-muted); font-size: 14.5px; max-width: 56ch; }
+  footer .contact-row{ margin-top: 16px; }
+
+  @media (prefers-reduced-motion: no-preference){
+    .fade-in{ animation: fadeIn 0.6s ease-out both; }
+  }
+  @keyframes fadeIn{ from{ opacity:0; transform: translateY(6px);} to{ opacity:1; transform: translateY(0);} }
+</style>
 </head>
 <body>
-    <h1>   My First Website</h1>
+
+<button class="toggle" id="themeToggle" type="button" aria-label="Toggle color theme">THEME</button>
+
+<div class="wrap">
+
+  <section class="hero fade-in" style="border-top:none;">
+    <svg class="hero-graph" viewBox="0 0 420 420" aria-hidden="true">
+      <line x1="60" y1="90" x2="180" y2="40"></line>
+      <line x1="180" y1="40" x2="300" y2="80"></line>
+      <line x1="60" y1="90" x2="140" y2="190"></line>
+      <line x1="180" y1="40" x2="140" y2="190"></line>
+      <line x1="300" y1="80" x2="330" y2="200"></line>
+      <line x1="140" y1="190" x2="330" y2="200"></line>
+      <line x1="140" y1="190" x2="220" y2="290"></line>
+      <line x1="330" y1="200" x2="220" y2="290"></line>
+      <circle cx="60" cy="90" r="5"></circle>
+      <circle cx="180" cy="40" r="6"></circle>
+      <circle cx="300" cy="80" r="5"></circle>
+      <circle cx="140" cy="190" r="7"></circle>
+      <circle cx="330" cy="200" r="5"></circle>
+      <circle cx="220" cy="290" r="6"></circle>
+    </svg>
+    <div class="hero-content">
+      <p class="eyebrow">Principal Software Engineer · AI Infrastructure</p>
+      <h1>Sandeep Halder</h1>
+      <p class="role">Building agentic AI and Graph RAG systems that automate security review, code quality analysis, knowledge retrieval, and QA generation across enterprise engineering workflows.</p>
+      <div class="chips">
+        <span class="chip">Agentic AI</span>
+        <span class="chip">Graph RAG</span>
+        <span class="chip">LangGraph</span>
+        <span class="chip">Neo4j</span>
+        <span class="chip">MCP Servers</span>
+      </div>
+      <div class="contact-row">
+        <a href="https://linkedin.com/in/sandeep-halder">LinkedIn</a>
+        <span class="sep">/</span>
+        <a href="mailto:mailbox.sandeephalder@gmail.com">Email</a>
+        <span class="sep">/</span>
+        <span class="chip plain">Bangalore, India</span>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <p class="eyebrow">Overview</p>
+    <p style="max-width:62ch; margin:0;">Principal Software Engineer with 10+ years designing and scaling enterprise software. I currently lead AI infrastructure at Dell, building agentic and Graph RAG systems that automate security review, code quality analysis, knowledge retrieval, and QA generation across engineering workflows. Currently pursuing an MTech in Artificial Intelligence at BITS Pilani.</p>
+  </section>
+
+  <section>
+    <p class="eyebrow">What I've built</p>
+    <div class="impact-grid">
+      <div class="impact-card">
+        <h3>AI vulnerability checker</h3>
+        <p>Devin, MCP servers, and LangGraph wired directly into the PR pipeline to catch security issues before they escape to production.</p>
+      </div>
+      <div class="impact-card">
+        <h3>Code-quality analyzer</h3>
+        <p>Agentic AI + MLflow running on every check-in to speed up PR review and reduce manual review load.</p>
+      </div>
+      <div class="impact-card">
+        <h3>Graph RAG knowledge base</h3>
+        <p>LangChain + Neo4j orchestrated with Airflow, unifying Jira, Git, and Confluence search into one retrieval layer.</p>
+      </div>
+      <div class="impact-card">
+        <h3>Automatic test-generation platform</h3>
+        <p>Neo4j Graph RAG, LangGraph, and MCP servers, cutting down manual QA scripting effort.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <p class="eyebrow">Toolkit</p>
+
+    <div class="stack-group">
+      <h3>AI / ML</h3>
+      <div class="chips">
+        <span class="chip">LangChain</span><span class="chip">LangGraph</span><span class="chip">Neo4j</span>
+        <span class="chip">MLflow</span><span class="chip">Graph RAG</span><span class="chip">MCP Servers</span>
+        <span class="chip">Hugging Face (PEFT / LoRA)</span><span class="chip">LiteLLM</span>
+        <span class="chip">Portkey</span><span class="chip">Ragas</span><span class="chip">DeepEval</span>
+      </div>
+    </div>
+
+    <div class="stack-group">
+      <h3>Languages</h3>
+      <div class="chips">
+        <span class="chip">Java</span><span class="chip">Python</span><span class="chip">RxJava</span>
+      </div>
+    </div>
+
+    <div class="stack-group">
+      <h3>Data</h3>
+      <div class="chips">
+        <span class="chip">Neo4j</span><span class="chip">Oracle</span><span class="chip">PostgreSQL</span>
+        <span class="chip">TimescaleDB</span><span class="chip">pgvector</span>
+      </div>
+    </div>
+
+    <div class="stack-group">
+      <h3>Cloud &amp; DevOps</h3>
+      <div class="chips">
+        <span class="chip">AWS</span><span class="chip">Docker</span><span class="chip">Kubernetes</span>
+        <span class="chip">OpenShift</span><span class="chip">Jenkins</span><span class="chip">Airflow</span><span class="chip">Git</span>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <p class="eyebrow">Career</p>
+    <div class="timeline">
+      <div class="t-item">
+        <span class="t-period">2021 — Present</span>
+        <div class="t-role">Principal Software Engineer, AI Systems &amp; Architecture</div>
+        <div class="t-org">Dell Technologies</div>
+      </div>
+      <div class="t-item">
+        <span class="t-period">2018 — 2021</span>
+        <div class="t-role">Senior Software Engineer</div>
+        <div class="t-org">Dell Technologies</div>
+      </div>
+      <div class="t-item">
+        <span class="t-period">2015 — 2017</span>
+        <div class="t-role">Senior Software Engineer — Algorithmic Optimizations &amp; ML</div>
+        <div class="t-org">Oracle</div>
+      </div>
+      <div class="t-item">
+        <span class="t-period">2013 — 2016</span>
+        <div class="t-role">Module Lead / Software Engineer — cloud metering, insurance systems</div>
+        <div class="t-org">VMware &amp; CenturyLink</div>
+      </div>
+      <div class="t-item">
+        <span class="t-period">2006 — 2013</span>
+        <div class="t-role">Progressive engineering roles — B2B SOA middleware, web platforms</div>
+        <div class="t-org">Capgemini, Notional Systems</div>
+      </div>
+      <div class="t-item">
+        <span class="t-period">2006 — 2008</span>
+        <div class="t-role">Founder — shipped an Operational Risk Management app for Bank of Jeddah</div>
+        <div class="t-org">Axis (own startup)</div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <p class="eyebrow">Education</p>
+    <ul class="edu-list">
+      <li><span class="edu-degree">MTech, Artificial Intelligence</span><span class="edu-school">BITS Pilani · in progress</span></li>
+      <li><span class="edu-degree">PGDM, Finance</span><span class="edu-school">Sinhgad Business School</span></li>
+      <li><span class="edu-degree">Masters in Management</span><span class="edu-school">University of Pune</span></li>
+      <li><span class="edu-degree">B.Tech, Electronics &amp; Communication</span><span class="edu-school">Kalyani Govt. Engineering College</span></li>
+    </ul>
+  </section>
+
+  <section>
+    <p class="eyebrow">Certifications</p>
+    <div class="chips">
+      <span class="chip plain">Machine Learning</span>
+      <span class="chip plain">NLP</span>
+      <span class="chip plain">SCJP 6</span>
+      <span class="chip plain">NCFM Capital &amp; Derivative Market</span>
+    </div>
+  </section>
+
+  <footer>
+    <p class="eyebrow">Get in touch</p>
+    <p>Open to conversations on agentic AI, Graph RAG, and enterprise AI infrastructure.</p>
+    <div class="contact-row">
+      <a href="https://linkedin.com/in/sandeep-halder">LinkedIn</a>
+      <span class="sep">/</span>
+      <a href="mailto:mailbox.sandeephalder@gmail.com">Email</a>
+      <span class="sep">/</span>
+      <a href="https://github.com/sandeephalder">GitHub</a>
+    </div>
+  </footer>
+
+</div>
+
+<script>
+  (function(){
+    var root = document.documentElement;
+    var btn = document.getElementById('themeToggle');
+    var stored = localStorage.getItem('theme');
+    if (stored) root.setAttribute('data-theme', stored);
+    btn.addEventListener('click', function(){
+      var current = root.getAttribute('data-theme');
+      var prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+      var effectiveDark = current ? current === 'dark' : prefersDark;
+      var next = effectiveDark ? 'light' : 'dark';
+      root.setAttribute('data-theme', next);
+      localStorage.setItem('theme', next);
+    });
+  })();
+</script>
+
 </body>
 </html>
