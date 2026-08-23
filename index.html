@@ -195,6 +195,32 @@
   .t-role{ font-weight: 600; }
   .t-org{ color: var(--ink-muted); font-size: 15px; }
 
+  /* repos */
+  .repo-grid{ display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 18px; }
+  @media (max-width: 620px){ .repo-grid{ grid-template-columns: 1fr; } }
+  .repo-status{ grid-column: 1 / -1; color: var(--ink-muted); font-size: 14.5px; margin: 0; }
+  .repo-card{
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    padding: 16px 18px;
+    box-shadow: 0 1px 3px var(--shadow);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .repo-card h3{ font-family: 'IBM Plex Sans', sans-serif; font-size: 15px; font-weight: 600; margin: 0; }
+  .repo-card h3 a{ color: var(--ink); text-decoration: none; }
+  .repo-card h3 a:hover{ color: var(--accent-strong); text-decoration: underline; }
+  .repo-card p{ margin: 0; font-size: 14px; color: var(--ink-muted); flex-grow: 1; }
+  .repo-meta{
+    display: flex; gap: 14px; align-items: center;
+    font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--ink-muted);
+    margin-top: 4px;
+  }
+  .repo-meta .dot{ width: 8px; height: 8px; border-radius: 50%; background: var(--accent); display: inline-block; margin-right: 5px; }
+  .repo-more{ grid-column: 1 / -1; text-align: right; font-size: 14px; margin-top: 2px; }
+
   .edu-list{ list-style: none; padding: 0; margin: 20px 0 0; }
   .edu-list li{ padding: 10px 0; border-bottom: 1px solid var(--rule); display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
   .edu-list li:last-child{ border-bottom: none; }
@@ -281,6 +307,13 @@
         <h3>Automatic test-generation platform</h3>
         <p>Neo4j Graph RAG, LangGraph, and MCP servers, cutting down manual QA scripting effort.</p>
       </div>
+    </div>
+  </section>
+
+  <section>
+    <p class="eyebrow">Repositories</p>
+    <div id="repo-grid" class="repo-grid">
+      <p class="repo-status">Loading public repositories…</p>
     </div>
   </section>
 
@@ -407,6 +440,63 @@
       root.setAttribute('data-theme', next);
       localStorage.setItem('theme', next);
     });
+  })();
+</script>
+
+<script>
+  (function(){
+    var GH_USER = 'sandeephalder';
+    var MAX_SHOWN = 8;
+    var grid = document.getElementById('repo-grid');
+
+    function escapeHtml(str){
+      var div = document.createElement('div');
+      div.textContent = str || '';
+      return div.innerHTML;
+    }
+
+    function formatDate(iso){
+      var d = new Date(iso);
+      return d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+    }
+
+    fetch('https://api.github.com/users/' + GH_USER + '/repos?type=owner&per_page=100&sort=pushed', {
+      headers: { 'Accept': 'application/vnd.github+json' }
+    })
+      .then(function(res){
+        if (!res.ok) throw new Error('GitHub API error ' + res.status);
+        return res.json();
+      })
+      .then(function(repos){
+        var visible = repos.filter(function(r){ return !r.fork && !r.private; });
+        visible.sort(function(a, b){ return new Date(b.pushed_at) - new Date(a.pushed_at); });
+
+        if (!visible.length){
+          grid.innerHTML = '<p class="repo-status">No public repositories yet — see <a href="https://github.com/' + GH_USER + '?tab=repositories">github.com/' + GH_USER + '</a>.</p>';
+          return;
+        }
+
+        var shown = visible.slice(0, MAX_SHOWN);
+        var html = shown.map(function(r){
+          var desc = escapeHtml(r.description) || 'No description yet.';
+          var lang = r.language ? '<span><span class="dot"></span>' + escapeHtml(r.language) + '</span>' : '';
+          var stars = r.stargazers_count > 0 ? '<span>★ ' + r.stargazers_count + '</span>' : '';
+          return '<div class="repo-card">' +
+            '<h3><a href="' + r.html_url + '" target="_blank" rel="noopener">' + escapeHtml(r.name) + '</a></h3>' +
+            '<p>' + desc + '</p>' +
+            '<div class="repo-meta">' + lang + stars + '<span>Updated ' + formatDate(r.pushed_at) + '</span></div>' +
+            '</div>';
+        }).join('');
+
+        if (visible.length > MAX_SHOWN){
+          html += '<p class="repo-more"><a href="https://github.com/' + GH_USER + '?tab=repositories">View all ' + visible.length + ' repositories →</a></p>';
+        }
+
+        grid.innerHTML = html;
+      })
+      .catch(function(){
+        grid.innerHTML = '<p class="repo-status">Couldn\'t load repositories right now — see <a href="https://github.com/' + GH_USER + '?tab=repositories">github.com/' + GH_USER + '</a> directly.</p>';
+      });
   })();
 </script>
 
