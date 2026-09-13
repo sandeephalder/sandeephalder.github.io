@@ -1,0 +1,303 @@
+<figure style="margin:0 0 2em;">
+<img src="VectorDB comparision.png" alt="Comparative analysis of Chroma, pgvector, Qdrant and Pinecone across core function, indexing strategy, retrieval and filtering, measured performance, scaling and cost" style="width:100%;height:auto;border-radius:10px;">
+<figcaption style="font-size:13px;color:#667;margin-top:8px;line-height:1.5;">The four candidates, across the six dimensions that decide the choice. Performance figures are from the Timescale benchmark discussed below — 50 million vectors, 768 dimensions, one instance type. Every number in that row is conditional on that setup.</figcaption>
+</figure>
+
+<p>Most teams pick a vector database twice. The first time is on day three of a prototype, when someone types <code>pip install chromadb</code> because it is the shortest path to a working retrieval loop. The second time is eight months later, at 2am, when that same process has a 40&nbsp;GB resident set and the box has started swapping.</p>
+
+<p>The decision in between never happens. And when it finally does get revisited, it usually gets made on the wrong evidence — a benchmark leaderboard, a conference talk, a table in a blog post that looks a lot like the one above. Leaderboards measure a workload. The question is whether it is <em>your</em> workload.</p>
+
+<p>This post is the long version of that decision. It covers what these four systems actually do differently at the index level, why the published benchmark numbers point in opposite directions depending on who published them, and how to keep the choice reversible so that being wrong costs you a deploy rather than a quarter.</p>
+
+<h2>Two operations, and everything else is secondary</h2>
+
+<p>Strip away the marketing and a vector database does two things:</p>
+
+<ol>
+<li><strong>Store a high-dimensional float array with an identifier and some metadata.</strong></li>
+<li><strong>Given a query array, return the <em>k</em> stored arrays closest to it under some distance metric — fast, and usually approximately.</strong></li>
+</ol>
+
+<p>That is it. Everything else — the SDK ergonomics, the LangChain integration, the dashboard, the managed control plane — is packaging around those two operations. Which matters, because packaging is where these four products differ most visibly and least importantly.</p>
+
+<p>The word doing the heavy lifting in operation two is <strong>approximately</strong>. Exact nearest-neighbour search over a million 768-dimensional vectors means a million dot products per query. That is a linear scan, it is embarrassingly parallel, and on a modern CPU it is also completely impractical past a few hundred thousand vectors if you want single-digit millisecond responses.</p>
+
+<p>So every one of these systems gives up exactness. They build an index that answers "close enough, most of the time," and the entire engineering conversation is about the shape of that compromise: how much recall you sacrifice, how much memory you spend, how long the index takes to build, and how gracefully the whole thing degrades when you add a <code>WHERE</code> clause.</p>
+
+<h2>The index is the product</h2>
+
+<p>Four index families show up across these four databases. Understanding them is most of the work, because the vendor differences downstream are largely consequences of which family they bet on.</p>
+
+<h3>HNSW — the default everywhere</h3>
+
+<p>Hierarchical Navigable Small World graphs are what Chroma uses, what Qdrant uses, and what pgvector uses by default. The structure is a stack of proximity graphs. The bottom layer contains every vector, each connected to its <em>m</em> nearest neighbours. Each layer above is a sparser sample of the one below, with longer-range edges.</p>
+
+<p>Search starts at an entry point in the top, sparse layer and greedily walks toward the query — always stepping to the neighbour that reduces distance most. When it can no longer improve, it drops a layer and repeats with a denser graph and shorter hops. The top layers do coarse navigation across the space; the bottom layer does fine-grained refinement. It is a skip list for metric spaces.</p>
+
+<p>Three parameters control it, and they are the same three everywhere:</p>
+
+<ul>
+<li><strong><code>m</code></strong> (Chroma calls it <code>max_neighbors</code>) — edges per node. More edges mean better connectivity and higher recall, at the cost of memory and build time. pgvector and Chroma default to 16; Qdrant's default is 16 and the Timescale benchmark ran it at 32.</li>
+<li><strong><code>ef_construction</code></strong> — how many candidates the builder considers when choosing each node's neighbours. Higher means a better graph and a slower build. pgvector defaults to 64, Chroma to 100.</li>
+<li><strong><code>ef_search</code></strong> (Qdrant: <code>hnsw_ef</code>) — the size of the candidate list at query time. This is the <em>only</em> one you can change after the fact, and it is the recall/latency dial. pgvector defaults to 40, Chroma to 100.</li>
+</ul>
+
+<p>The important structural fact about HNSW: <strong>it wants to be in RAM</strong>. The access pattern is a pointer chase through a graph, which is close to the worst possible pattern for a block device. This single property explains most of Chroma's scaling story and a good chunk of pgvector's.</p>
+
+<h3>IVFFlat — the cheap alternative</h3>
+
+<p>pgvector's other built-in index partitions the vector space into <code>lists</code> clusters via k-means, then stores each vector in its nearest cluster's posting list. A query finds the nearest few cluster centroids and scans only those lists. <code>probes</code> controls how many it scans.</p>
+
+<p>The trade is straightforward: IVFFlat builds much faster and uses much less memory than HNSW, and it returns worse results at equivalent speed. It also needs representative data present at build time in order to train the centroids, which means you cannot create it on an empty table and you should rebuild it after the data distribution shifts substantially. pgvector's guidance is <code>lists = rows / 1000</code> below a million rows and <code>sqrt(rows)</code> above it, with <code>probes</code> starting around <code>sqrt(lists)</code>.</p>
+
+<p>In practice IVFFlat is the right call when your index does not fit in memory and you cannot use DiskANN, or when build time genuinely dominates. Otherwise HNSW wins.</p>
+
+<h3>DiskANN / Vamana — designed for the SSD</h3>
+
+<p>This is the interesting one, and it is why the benchmark result later in this post is counterintuitive.</p>
+
+<p>DiskANN — from Microsoft Research, built on a graph called Vamana — starts from a different premise than HNSW. Instead of assuming the index lives in memory, it assumes the index lives on an NVMe SSD and is designed to minimise the number of random reads per query. It is a single flat graph rather than a hierarchy, built with a pruning rule that deliberately keeps some long-range edges so that greedy search converges in few hops. Fewer hops means fewer disk reads.</p>
+
+<p>The <code>pgvectorscale</code> extension brings a streaming variant of this to Postgres, paired with <strong>Statistical Binary Quantization</strong> — a refinement of ordinary binary quantization that encodes each dimension as one or two bits, chosen using the statistical distribution of that dimension rather than a fixed threshold at zero. The compressed codes stay in memory and drive the graph traversal; full-precision vectors stay on disk and are used to rescore the shortlist at the end.</p>
+
+<p>The result is an index roughly an order of magnitude smaller than HNSW over the same data, that tolerates spilling to disk, and that parallelises well across many concurrent queries. Hold that last clause — it matters in the benchmark section.</p>
+
+<h3>SPANN — partition, then graph</h3>
+
+<p>Distributed Chroma and Chroma Cloud use SPANN, based on the SPFresh line of work. SPANN splits the difference between IVF and graph methods: a small in-memory index over cluster centroids routes a query to a handful of posting lists, and those posting lists live on disk. The design target is explicitly the case where the full index cannot fit on one machine.</p>
+
+<p>Worth being precise about what this means for the comparison: <strong>Chroma Cloud is not the same engine as the Chroma you pip install.</strong> They share an API. They do not share an index, a storage layer, or a scaling story. Benchmarks or experience with one tell you very little about the other, and Chroma does not currently expose SPANN's configuration for tuning.</p>
+
+<h2>Chroma: correct for development, and that is the whole point</h2>
+
+<p>Chroma in local mode is SQLite for records plus a fork of hnswlib for the index, running inside your Python process. There is no server, no network hop, no connection pool. For a prototype this is close to ideal — the entire retrieval layer is a directory on disk that you can delete and rebuild in seconds.</p>
+
+<p>The limits are documented, specific, and worth memorising before you deploy anything. Chroma's own guidance gives a linear capacity formula for 1024-dimensional embeddings with a few metadata fields:</p>
+
+<table>
+<thead><tr><th>Instance RAM</th><th>Practical maximum records</th></tr></thead>
+<tbody>
+<tr><td>2 GB (documented minimum)</td><td>~250,000</td></tr>
+<tr><td>8 GB</td><td>~1,700,000</td></tr>
+<tr><td>32 GB</td><td>~7,500,000</td></tr>
+<tr><td>64 GB</td><td>~15,000,000</td></tr>
+</tbody>
+</table>
+
+<p>The rule of thumb behind it: <strong>maximum collection size in millions &asymp; 0.245 &times; RAM in gigabytes</strong>, with at least a gigabyte reserved for the system. Query latency in that regime is genuinely good — 4 to 8&nbsp;ms mean, with 99.9th percentiles between 7 and 33&nbsp;ms — and it grows roughly linearly with collection size.</p>
+
+<p>What makes it a production hazard is not the ceiling. It is <em>the shape of the failure at the ceiling</em>. HNSW's memory layout does not page gracefully. When the index no longer fits, the operating system starts swapping a structure whose entire access pattern is random pointer chasing, and latency does not degrade — it collapses. You do not get a warning band where things are slow but serviceable. You get a system that was fine yesterday and is unusable today.</p>
+
+<p>Two smaller operational notes. Queries parallelise up to the vCPU count and then queue linearly, so concurrency past your core count buys nothing. And inserts want batches: anything from 50 to 250 is reasonable, with throughput plateauing around 150 as the CPU saturates.</p>
+
+<p><strong>Use it for</strong> prototypes, notebooks, single-developer projects, evaluation harnesses, and anything comfortably under a few million records where you control the growth curve. <strong>Do not use it</strong> as a production default that you will "migrate later," because later is defined by an incident.</p>
+
+<h2>pgvector: the case for not adding a database</h2>
+
+<p>pgvector is an extension, not a database. That sentence is the entire argument for it. <code>CREATE EXTENSION vector</code> gives you a column type, four distance operators, and two index methods. Everything else — transactions, joins, replication, point-in-time recovery, your existing backup rota, your existing monitoring, your existing on-call runbook — you already have.</p>
+
+<p>The storage layout is worth internalising because it drives the capacity math:</p>
+
+<table>
+<thead><tr><th>Type</th><th>Bytes per value</th><th>Max dimensions</th><th>Use</th></tr></thead>
+<tbody>
+<tr><td><code>vector</code></td><td>4 &times; dims + 8</td><td>2,000</td><td>Full float32 precision</td></tr>
+<tr><td><code>halfvec</code></td><td>2 &times; dims + 8</td><td>4,000</td><td>float16 — half the storage, usually negligible recall loss</td></tr>
+<tr><td><code>bit</code></td><td>dims / 8 + 8</td><td>64,000</td><td>Binary quantization, Hamming/Jaccard distance</td></tr>
+<tr><td><code>sparsevec</code></td><td>8 &times; non-zero + 16</td><td>16,000 non-zero</td><td>Sparse/lexical representations</td></tr>
+</tbody>
+</table>
+
+<p>Ten million 768-dimensional vectors is 30.8&nbsp;GB as <code>vector</code>, 15.4&nbsp;GB as <code>halfvec</code>, and 1.04&nbsp;GB as <code>bit</code> — before the index. That last column is why quantization is not an optimisation you add later; it is a design decision that determines which instance sizes are even on the table.</p>
+
+<p>The distance operators are <code>&lt;-&gt;</code> (L2), <code>&lt;=&gt;</code> (cosine), <code>&lt;#&gt;</code> (negative inner product) and <code>&lt;+&gt;</code> (L1), with <code>&lt;~&gt;</code> and <code>&lt;%&gt;</code> for Hamming and Jaccard on bit vectors. The index only helps when the operator in your <code>ORDER BY</code> matches the operator class the index was built with — a mismatch produces a silent sequential scan, not an error.</p>
+
+<p>Two of those knobs are worth calling out. <code>m</code> and <code>ef_construction</code> are fixed when the index is created and cannot be changed without a full rebuild, so they are a commitment rather than a setting. <code>hnsw.ef_search</code> is a session variable, which makes it the one accuracy dial you can turn per connection — raise it for recall, lower it for latency. Build time is governed by <code>maintenance_work_mem</code> and <code>max_parallel_maintenance_workers</code>; if the graph does not fit in the former, the build gets dramatically slower and the resulting index is worse.</p>
+
+<p>There is one behaviour here that is the single most common way a pgvector deployment is quietly broken. <strong>Filters are applied after the index scan, not during it.</strong> The HNSW walk returns its <code>LIMIT</code> worth of candidates by pure vector distance; the <code>WHERE</code> clause then discards whichever of them fail the predicate. Ask for ten results with a selective tenant filter and you may get three — not an error, not a warning, just a shorter list and an answer with less context than you designed for.</p>
+
+<p>Iterative index scans, added in pgvector 0.8, are the fix: the scan resumes and fetches more candidates until the limit is satisfied or a tuple budget is exhausted. <code>relaxed_order</code> allows slight reordering for better recall; <code>strict_order</code> preserves exact distance ordering at higher cost. If you filter at all — and everyone with multi-tenancy filters — this is not optional configuration.</p>
+
+<p>The honest weaknesses: index builds are slow and memory-hungry, HNSW build quality depends on the graph fitting in <code>maintenance_work_mem</code>, and <code>pgvectorscale</code>'s DiskANN build is currently single-threaded. There is no native sparse-vector fusion; you can combine <code>tsvector</code> full-text search with vector search in SQL, but you write the fusion logic yourself. And every vector operation competes for the same buffer cache as your OLTP traffic, which is fine until it isn't.</p>
+
+<h2>Qdrant: what a purpose-built engine actually buys</h2>
+
+<p>Qdrant is a search engine written in Rust whose central design decision is that <strong>vectors and structured payload are equal citizens</strong>. Data lives in segments, each independently indexed and optimised, which is what lets the storage tiering and the horizontal sharding work.</p>
+
+<p>Three things distinguish it in practice.</p>
+
+<p><strong>Filterable HNSW.</strong> Covered in detail in the next section, but the short version is that Qdrant builds payload-aware edges into the graph at construction time, so filtered search does not fall back to either of the two bad strategies everyone else uses.</p>
+
+<p><strong>Quantization with rescoring as a first-class path.</strong> Scalar quantization maps float32 to int8 for a 4&times; reduction. Binary quantization takes each dimension to a single bit for up to 32&times;, and because comparison becomes a XOR and a popcount, it is dramatically faster as well as smaller. The accuracy loss is recovered by <em>oversampling</em> — pulling, say, twice as many candidates using the cheap codes — and then <em>rescoring</em> that shortlist against full-precision vectors held on disk. You pay one sequential read at the end of the query instead of carrying full precision through the whole traversal.</p>
+
+<p><strong>Explicit memory tiering.</strong> Indexes can be <code>pinned</code> (always resident), <code>cached</code> (in the disk cache, evictable under pressure), or <code>cold</code> (on disk, loaded on demand). Combined with <code>is_tenant</code> and <code>is_principal</code> payload indexes — which physically colocate a tenant's data, or order storage by a timestamp field — this gives you real control over what occupies RAM in a multi-tenant system.</p>
+
+<p>One ordering constraint deserves emphasis, because it is expensive to discover late. Qdrant only builds filter-aware graph edges for fields that are indexed <em>at the time the HNSW graph is constructed</em>. Add the payload index after ingesting a hundred million points and you have an index that answers filter predicates but a graph that knows nothing about them — you need a rebuild to get the benefit. This is an easy and expensive mistake.</p>
+
+<p>The cost of Qdrant is simply that it is a second stateful system. Another thing to deploy, monitor, back up, upgrade, and reason about during an incident. If your data already lives in Postgres, you are also now responsible for keeping two stores consistent, which is a distributed systems problem you did not have yesterday.</p>
+
+<h2>Pinecone: paying to not think about it</h2>
+
+<p>Pinecone serverless is architecturally the most different of the four. Records compact into <strong>immutable files called slabs</strong> that live in object storage. Writes go to a log with a sequence number and return <code>200 OK</code> as soon as they are durable; an index builder asynchronously moves data from an in-memory memtable into slabs and merges small slabs into larger ones over time. Reads go through a query router to executors that fetch and cache the relevant slabs locally.</p>
+
+<p>A <strong>freshness layer</strong> tails the same log so that recent writes are searchable before they have been compacted — and reads check the memtable first, which is what gives you read-your-writes behaviour rather than the eventual consistency you might expect from an object-storage-backed system.</p>
+
+<p>The consequences are worth stating plainly:</p>
+
+<ul>
+<li><strong>Capacity is effectively unbounded</strong> and read/write paths scale independently, because they are genuinely different services.</li>
+<li><strong>Latency is bimodal.</strong> A query against cached slabs is fast. A query that touches a cold slab pays an object-storage fetch. For steady traffic against a hot working set this rarely matters; for sparse access across a very large index it absolutely does.</li>
+<li><strong>You cannot tune the index.</strong> No <code>m</code>, no <code>ef_search</code>, no quantization choice. This is the product working as intended — it is also the reason a workload with unusual recall requirements can hit a wall you have no lever against.</li>
+</ul>
+
+<p>The documented limits that most often surprise people: 40&nbsp;KB of filterable metadata per record, <code>top_k</code> capped at 10,000 with a 4&nbsp;MB result ceiling, upserts capped at 2&nbsp;MB or 1,000 records per request, <code>$in</code>/<code>$nin</code> arrays capped at 10,000 values, and — the one that catches people building high-throughput pipelines — <strong>a default of 100 requests per second per namespace</strong> for queries, upserts and deletes alike. That is adjustable on request, but it needs to be discovered before launch rather than during it.</p>
+
+<h2>The filtering problem, which is where most RAG systems actually die</h2>
+
+<p>Pure vector search is a solved problem. Vector search <em>with a predicate</em> is not, and almost every real system has predicates: tenant isolation, document ACLs, date ranges, language, source, status.</p>
+
+<p>There are two obvious strategies and both are bad.</p>
+
+<p><strong>Post-filtering</strong> runs the ANN search first and applies the predicate to the results. It is trivial to implement and it breaks precisely when the filter is selective. If one percent of your corpus belongs to this tenant, retrieving 10 by vector similarity and then filtering leaves you with roughly nothing. You compensate by over-fetching — retrieve 1,000, filter, keep 10 — which works until the selectivity gets worse, at which point you are over-fetching 100,000 and have reinvented the linear scan with extra steps.</p>
+
+<p><strong>Pre-filtering</strong> applies the predicate first and searches only the surviving subset. This guarantees correct results, and it destroys the index. HNSW's graph connectivity assumes all its nodes are present; remove most of them and the greedy walk strands itself in disconnected components. In practice pre-filtering degenerates to a brute-force scan over the filtered set, which is fine for a thousand rows and catastrophic for ten million.</p>
+
+<p>This is the actual differentiator between these four systems.</p>
+
+<ul>
+<li><strong>Chroma</strong> offers metadata <code>where</code> clauses with effectively post-filter semantics.</li>
+<li><strong>pgvector</strong> post-filters by construction — the predicate is a SQL <code>WHERE</code> evaluated on rows the index scan already returned — with iterative scans as the mitigation.</li>
+<li><strong>Pinecone</strong> handles filtering inside the managed index, with the metadata size and <code>$in</code> cardinality limits noted above.</li>
+<li><strong>Qdrant</strong> attacks the problem structurally. When payload indexes exist at build time, it adds <em>extra edges</em> to the HNSW graph connecting points that share indexed payload values. The graph stays navigable under a filter because the filter-satisfying subgraph was explicitly given its own connectivity. For hard multi-predicate cases where those edges are still insufficient, ACORN (v1.16+) explores neighbours-of-neighbours when direct neighbours are filtered out, trading throughput for accuracy.</li>
+</ul>
+
+<p>This is an active research area rather than a settled one. The literature includes ACORN, Filtered-DiskANN (in FilteredVamana and StitchedVamana variants), UNG, Curator and SIEVE, and recent benchmark work is fairly blunt that no method dominates: specialised approaches often beat ACORN, while several methods that look excellent at medium scale fail outright on large transformer-embedding datasets. The practical takeaway is not "Qdrant wins filtered search" — it is that <strong>if your workload is filter-heavy, you must benchmark filtered queries specifically</strong>, because unfiltered numbers will not predict them.</p>
+
+<h2>Hybrid search: the other half of retrieval quality</h2>
+
+<p>Dense vectors are bad at exact matches. Part numbers, error codes, proper nouns, rare acronyms — the embedding puts them in a neighbourhood of semantically similar things, which is exactly wrong when the user typed a literal identifier. Sparse lexical retrieval (BM25 and its learned successors like SPLADE) is good at precisely that and bad at paraphrase. Combining them, usually with Reciprocal Rank Fusion, reliably beats either alone.</p>
+
+<p>Support here is genuinely uneven, and it is the dimension the comparison table above compresses most:</p>
+
+<ul>
+<li><strong>Qdrant</strong> — native sparse vectors since v1.7, dense and sparse in one collection, RRF and weighted linear fusion in the Query API. The cleanest of the four.</li>
+<li><strong>Pinecone</strong> — sparse-dense hybrid supported within the managed index.</li>
+<li><strong>pgvector</strong> — no sparse fusion primitive. You can absolutely run <code>tsvector</code> full-text alongside vector search and fuse in SQL or in application code, and plenty of production systems do, but you are writing and maintaining that logic.</li>
+<li><strong>Chroma</strong> — limited.</li>
+</ul>
+
+<p>RRF at <em>k</em>=60 is the sensible default. It ranks rather than scores, so it needs no normalisation between two systems whose score distributions have nothing in common.</p>
+
+<h2>The benchmark, and why its result is counterintuitive</h2>
+
+<p>The most-cited head-to-head here is Timescale's, and it is worth walking through carefully because the shape of the result is more instructive than the winner.</p>
+
+<p><strong>Setup:</strong> 50 million Cohere embeddings at 768 dimensions, 1,000 test queries, AWS <code>r6id.4xlarge</code> (16 vCPU, 128&nbsp;GB RAM, 950&nbsp;GB NVMe), about $835/month. pgvectorscale ran StreamingDiskANN with SBQ and a rescore depth of 400. Qdrant ran HNSW at <code>m</code>=32, <code>ef_construct</code>=64, <code>hnsw_ef</code>=768, with binary quantization and rescoring enabled.</p>
+
+<table>
+<thead><tr><th>At 99% recall</th><th>pgvectorscale</th><th>Qdrant</th></tr></thead>
+<tbody>
+<tr><td>p50 latency</td><td>31.07 ms</td><td><strong>30.75 ms</strong></td></tr>
+<tr><td>p95 latency</td><td>60.42 ms</td><td><strong>36.73 ms</strong></td></tr>
+<tr><td>p99 latency</td><td>74.60 ms</td><td><strong>38.71 ms</strong></td></tr>
+<tr><td>Throughput</td><td><strong>471.57 QPS</strong></td><td>41.47 QPS</td></tr>
+<tr><td>Index build time</td><td>~11.1 hours</td><td><strong>~3.3 hours</strong></td></tr>
+</tbody>
+</table>
+
+<table>
+<thead><tr><th>At 90% recall</th><th>pgvectorscale</th><th>Qdrant</th></tr></thead>
+<tbody>
+<tr><td>p50 latency</td><td>9.54 ms</td><td><strong>4.74 ms</strong></td></tr>
+<tr><td>p95 latency</td><td>13.30 ms</td><td><strong>5.50 ms</strong></td></tr>
+<tr><td>p99 latency</td><td>15.73 ms</td><td><strong>5.79 ms</strong></td></tr>
+<tr><td>Throughput</td><td><strong>1,589.79 QPS</strong></td><td>360.81 QPS</td></tr>
+</tbody>
+</table>
+
+<p>Read those two tables again. <strong>Qdrant wins every latency percentile. pgvectorscale wins throughput by 11.4&times;.</strong> Both are true simultaneously, and if your instinct is that one of them must be a measurement error, that instinct is what this section exists to correct.</p>
+
+<p>Latency and throughput answer different questions. Latency is how long one query takes when the system is not fighting itself. Throughput is how many queries the system completes per second when it is fully loaded — which is a question about <em>parallel efficiency</em>, not about single-query speed.</p>
+
+<p>The architectures explain the split. Qdrant at 99% recall needed <code>hnsw_ef</code>=768 — an enormous candidate list. Each query does a large amount of tightly-coupled graph traversal work, and it does it very consistently, which is exactly why the tail is tight: p50 30.75&nbsp;ms to p99 38.71&nbsp;ms is a spread of eight milliseconds. Predictability is the signature of a well-fed in-memory graph walk.</p>
+
+<p>StreamingDiskANN is doing something structurally different. It traverses a compressed in-memory graph, then rescores 400 candidates against full-precision vectors on NVMe. Any individual query has more variance — hence p99 nearly two and a half times p50 — but Postgres runs each connection in its own process, the SSD handles deep parallel queues well, and sixteen cores stay saturated. The design optimises aggregate work done, not the worst case for any one request.</p>
+
+<p><strong>So which number matters is a product question, not an engineering one.</strong> A user-facing chatbot lives and dies by p99, because the tail is what people experience as "it's slow." A nightly batch enrichment job over ten million documents cares only about total throughput and would happily accept a 75&nbsp;ms p99. Picking the database that wins the metric you do not care about is the most common way this decision goes wrong.</p>
+
+<h3>Reading benchmarks honestly</h3>
+
+<p>Four caveats, three of which the authors state themselves.</p>
+
+<p><strong>The publisher matters.</strong> That benchmark is published by Timescale, who build <code>pgvectorscale</code>. Qdrant publishes its own benchmark suite — against Elasticsearch, Milvus, Redis and Weaviate on dbpedia-openai-1M, deep-image-96, gist-960 and glove-100 — and concludes that Qdrant achieves the highest RPS and lowest latencies in almost every scenario. Notably, pgvector is not in that comparison set. Neither party is lying. Both are reporting real measurements from configurations they understand well and their competitor's less well.</p>
+
+<p><strong>Tuning effort is asymmetric and admitted.</strong> The Timescale authors state directly that it was time-prohibitive to test all Qdrant configurations and that they may have missed a better set of values. That is an honest disclosure, and it is also a structural feature of every vendor benchmark ever published.</p>
+
+<p><strong>Filtered search was excluded.</strong> The benchmark tested unfiltered ANN queries only. That omission removes the exact workload where Qdrant's filterable HNSW is designed to be differentiating — so on filter-heavy traffic, these numbers do not merely under-describe Qdrant, they may invert.</p>
+
+<p><strong>One instance type, one dataset, one dimensionality.</strong> 50M &times; 768-d on a machine with 128&nbsp;GB of RAM and fast local NVMe. Change any of those and the ranking can move: less RAM favours the disk-resident design, more RAM favours the in-memory graph, a different dimensionality changes the quantization arithmetic entirely.</p>
+
+<p>The Pinecone comparison from the same source follows the same pattern and deserves the same scepticism: pgvectorscale reported at 28&times; lower p95 and 16&times; higher throughput than Pinecone's <code>s1</code> at 99% recall, and 1.4&times;/1.5&times; better than <code>p2</code> at 90% — with the note that <code>p2</code> could not reach 99% recall at all. On cost, $835/month self-hosted against $3,241 for <code>s1</code> and $3,889 for <code>p2</code>. That cost gap is real and large. It also excludes the engineer who keeps the Postgres box alive, which for many teams is the more expensive line item.</p>
+
+<p>If you take one operational habit from this post: run <a href="https://github.com/zilliztech/VectorDBBench">VectorDBBench</a> against your own embeddings, your own filter distribution and your own hardware. It supports 30+ engines, it has explicit filtered-search and streaming cases, and it reports QPS, p50/p95/p99, recall, build time and a cost-normalised QP$ metric. A day of that is worth more than every leaderboard in this post.</p>
+
+<h2>Where each one actually breaks</h2>
+
+<p>Failure modes are more useful than feature matrices, because you will meet these.</p>
+
+<table>
+<thead><tr><th>System</th><th>What breaks</th><th>What it feels like</th></tr></thead>
+<tbody>
+<tr><td><strong>Chroma</strong></td><td>Index exceeds RAM</td><td>No degradation band — fine yesterday, swapping and unusable today</td></tr>
+<tr><td><strong>pgvector</strong></td><td>Selective filters without iterative scans</td><td>Silently short result sets; RAG answers get vaguer with no error anywhere</td></tr>
+<tr><td><strong>pgvector</strong></td><td>Index build at scale</td><td>Eleven hours, single-threaded, competing with production for buffer cache</td></tr>
+<tr><td><strong>Qdrant</strong></td><td>Payload index created after ingest</td><td>Filters work, filtered search is slow, and fixing it means rebuilding the graph</td></tr>
+<tr><td><strong>Qdrant</strong></td><td>Second stateful system</td><td>Dual-write consistency, a second backup story, a second thing to page you</td></tr>
+<tr><td><strong>Pinecone</strong></td><td>100 RPS per namespace default</td><td>Load test hits a wall that has nothing to do with the index</td></tr>
+<tr><td><strong>Pinecone</strong></td><td>Cold slabs, no tuning knobs</td><td>Tail latency you cannot engineer around, only escalate about</td></tr>
+</tbody>
+</table>
+
+<h3>Three mistakes that are not about the database at all</h3>
+
+<p><strong>The index was never built.</strong> Vector search works correctly with no index — it just does a sequential scan. On 50,000 rows in staging this is imperceptible. On 5 million in production it is a timeout. Nothing errors, because nothing is wrong; the query planner made a reasonable choice about a table it had no index for. Assert the index exists in a startup check.</p>
+
+<p><strong>Dimension mismatch after a model change.</strong> Swapping embedding models mid-project, or letting a provider default drift, produces vectors of a different width or — worse — the same width from a different latent space. Same-width mismatches do not error. They return confident, plausible, wrong neighbours. Pin the model and the dimension count in code, store both in collection metadata, and refuse to start when they disagree.</p>
+
+<p><strong>Estimating collection size from document count.</strong> Teams size infrastructure for "we have 100,000 documents" and forget that chunking multiplies. At 800-token chunks with overlap, a corpus of 100,000 modest documents is comfortably 2–3 million vectors. That is the difference between a laptop and a 32&nbsp;GB instance, and it is usually discovered after the instance has been provisioned.</p>
+
+<h2>The decision, in five questions</h2>
+
+<p>Answer these in order and stop at the first one that gives you a clear answer.</p>
+
+<ol>
+<li><strong>Is this going to production, or is it an experiment?</strong> If it is an experiment, use Chroma and stop reading. The time you save is real and the migration cost is low precisely because you have not built anything on it yet.</li>
+<li><strong>Is your operational data already in Postgres?</strong> If yes, the default is pgvector, and the burden of proof is on adding a second system. Joining embeddings to the rows they came from — with real transactions and one backup — eliminates an entire class of consistency bug that people routinely underestimate.</li>
+<li><strong>Are your queries filter-heavy or hybrid?</strong> Strict multi-tenancy, ACLs, date windows, or a genuine need to fuse BM25 with dense retrieval push hard toward Qdrant. This is the dimension where architecture, not tuning, decides the outcome.</li>
+<li><strong>Is p99 latency a product requirement or a vanity metric?</strong> If a user is waiting on the response, the tail is the product, and Qdrant's consistency has real value. If it is a batch pipeline, throughput wins and pgvectorscale's numbers are compelling.</li>
+<li><strong>What does an engineer-hour cost you relative to an instance-hour?</strong> Pinecone is roughly four times the infrastructure cost in the comparison above. For a team of three shipping a product, "nobody gets paged about the vector database" can be worth considerably more than $2,400 a month. For a team of thirty with a platform group, it usually is not.</li>
+</ol>
+
+<p>The uncomfortable truth underneath all five is that at one million vectors, on modern hardware, <strong>all four of these are fast enough</strong>. The differences that show up in benchmarks at fifty million are mostly invisible at one, and most RAG systems never reach ten. Which means the decision is usually not about performance at all — it is about operational fit, filter semantics, and who carries the pager.</p>
+
+<h2>Keep the choice reversible</h2>
+
+<p>Given all of the above, the highest-leverage thing you can do is make the decision cheap to revisit. Depend on a retrieval interface, not a client library, and the vector store becomes an environment variable.</p>
+
+<p>Concretely: put a single factory function behind every call site. It reads one variable — call it <code>VECTOR_STORE</code> — dispatches to a small builder per backend, and returns whatever retriever abstraction your framework provides. Nothing downstream imports a database client; the agent, the chain and the evaluation harness all see the same interface regardless of what is behind it. The embedding model and its dimension count belong in that same function, pinned explicitly, so a backend swap can never quietly become a model swap.</p>
+
+<p>This is not an abstraction for its own sake. It is what lets you develop against Chroma locally with no infrastructure, run integration tests against pgvector in CI, and deploy to Qdrant in production — with one variable and no changes to the agent or the chain that consumes the retriever. It also makes an honest comparison tractable: point the same evaluation set at each backend in turn and measure your own recall on your own filters, which is the only benchmark that was ever going to answer the question.</p>
+
+<p>Two constraints keep it useful. The <code>k</code> and the embedding model must be identical across backends or the comparison is meaningless. And the interface must stay narrow — the moment you leak <code>QdrantVectorStore</code>-specific parameters into a call site, the factory has stopped buying you anything.</p>
+
+<h2>Closing thought</h2>
+
+<p>The comparison table at the top of this post is useful and slightly dishonest, in the way all such tables are. It presents six dimensions as independent when they are deeply coupled: the index choice determines the memory profile, the memory profile determines the scaling ceiling, the filtering architecture determines whether the latency numbers mean anything for your traffic, and the operational burden determines whether any of it survives contact with a small team.</p>
+
+<p>The four systems are not really competing for the same job. Chroma is a development tool that can serve small production loads. pgvector is a way to avoid adding a database. Qdrant is a search engine for people whose queries have predicates. Pinecone is a way to convert an operational problem into an invoice.</p>
+
+<p>Pick the one whose failure mode you can live with, keep the interface narrow enough to change your mind, and benchmark your own filters before you trust anyone's numbers — including these.</p>
+
+<hr>
+
+<p style="font-size:14px;color:#667;line-height:1.7;"><strong>Sources and further reading.</strong> Benchmark figures throughout are from Timescale/TigerData's <a href="https://www.tigerdata.com/blog/pgvector-vs-qdrant">pgvector vs. Qdrant benchmark</a> and their <a href="https://www.tigerdata.com/blog/pgvector-is-now-as-fast-as-pinecone-at-75-less-cost">pgvector vs. Pinecone comparison</a>. Architecture and limits are from the <a href="https://github.com/pgvector/pgvector">pgvector</a> repository, <a href="https://qdrant.tech/documentation/concepts/indexing/">Qdrant's indexing documentation</a> and <a href="https://qdrant.tech/benchmarks/">benchmark suite</a>, <a href="https://docs.trychroma.com/guides/performance/single-node">Chroma's single-node performance guide</a> and <a href="https://docs.trychroma.com/docs/collections/configure">collection configuration docs</a>, and <a href="https://docs.pinecone.io/reference/architecture/serverless-architecture">Pinecone's serverless architecture</a> and <a href="https://docs.pinecone.io/reference/api/database-limits">database limits</a> references. For running your own numbers, <a href="https://github.com/zilliztech/VectorDBBench">VectorDBBench</a>. The framing of this post owes a debt to StackOps AI's <a href="https://www.youtube.com/watch?v=JTAI-7pUWE8">Choosing the Best Vector Database For Your RAG Pipeline</a>, which covers the same four systems and the same Timescale study.</p>

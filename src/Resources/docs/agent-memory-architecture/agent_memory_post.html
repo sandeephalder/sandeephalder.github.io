@@ -1,0 +1,415 @@
+<p>A large language model, on its own, remembers nothing. Every call into it is a cold start: you hand it a block of text, it produces a block of text, and the moment the response is returned the model has no idea any of it happened. That is a perfectly reasonable design for a text transformer. It is a terrible design for an agent.</p>
+
+<p>An agent is supposed to be the opposite of stateless. It should know who you are, remember that it already tried and failed a particular approach twenty minutes ago, recall that this exact production incident happened last quarter and how it was resolved, and stay inside the behavioural rules you set for it. None of that comes from the model weights. All of it comes from <strong>memory architecture</strong> — the scaffolding you build around the model to make a stateless function behave like a stateful, self-improving system.</p>
+
+<p>The centre of the diagram is deliberate. <strong>Working memory</strong> sits in the middle because it is the only tier the model actually sees. Everything else in the picture exists to decide what gets loaded into that centre box, and what gets written back out of it.</p>
+
+<p>Follow the arrows and you get the agent's lifecycle:</p>
+
+<ul>
+<li><strong>Procedural memory flows down</strong> into working memory as behavioural guidance — the rules, the tool schemas, the system prompt.</li>
+<li><strong>Semantic memory flows in from the left</strong> — you issue a semantic query, and user profiles and durable facts come back.</li>
+<li><strong>Episodic memory flows in from the right</strong> — a vector search over past execution traces returns relevant previous experiences and the solutions that worked.</li>
+<li><strong>Tools hang off the bottom</strong> — working memory dispatches tool calls, and observations come back into the message stream.</li>
+<li><strong>Consolidation flows back outward</strong> — the orange return paths. Extracted facts and preferences are written into semantic memory; the finished execution trace is written into episodic memory.</li>
+</ul>
+
+<p>That last set of arrows is the part most implementations skip, and it is the part that makes the difference between an agent with memory and an agent with a really long prompt. Retrieval without consolidation means the agent can only ever know what you manually put into the store. Consolidation is what lets it learn.</p>
+
+<h2>The four tiers, and what each one is actually for</h2>
+
+<p>The taxonomy borrows from cognitive psychology, but the engineering distinctions are real: each tier has a different lifespan, a different access pattern, and a different piece of infrastructure behind it.</p>
+
+<table>
+<thead>
+<tr><th>Memory type</th><th>Scope &amp; lifespan</th><th>Core purpose</th><th>Infrastructure</th></tr>
+</thead>
+<tbody>
+<tr><td><strong>1. Working / short-term</strong></td><td>Single execution / thread session</td><td>Active conversation turns, intermediate tool calls, reasoning traces, node state</td><td>LangGraph State, <code>MemorySaver</code>, Redis / Postgres checkpointers</td></tr>
+<tr><td><strong>2. Episodic</strong></td><td>Cross-session (past events)</td><td>Historical execution traces, problems solved, case-based resolutions</td><td>Vector stores, LangGraph <code>BaseStore</code> with embedding indices</td></tr>
+<tr><td><strong>3. Semantic / long-term</strong></td><td>Cross-session (permanent facts)</td><td>User profiles, technical preferences, system facts, entity relationships</td><td>Key-value stores, relational DBs, document stores (<code>PostgresStore</code>)</td></tr>
+<tr><td><strong>4. Procedural</strong></td><td>Permanent (rules &amp; skills)</td><td>Workflow rules, SOP constraints, tool JSON schemas, prompt heuristics</td><td>System prompts, graph DAG logic, schema validators, few-shot exemplars</td></tr>
+</tbody>
+</table>
+
+<h3>1. Working memory — the in-context state</h3>
+
+<p>This is the agent's scratchpad for a single run. It holds the message stream you can see in the diagram: the user prompt, the agent's own thoughts, the tool calls it emitted, and the observations that came back. In LangGraph this is literally the graph's state object, and it is governed by two hard constraints — the model's context limit, and whatever state reducer you attached to each field.</p>
+
+<p>The important property is that it is <em>checkpointed at super-step boundaries</em>. After every node completes, the full state is serialised. That gives you three things almost for free: you can inspect exactly what the agent believed at any step, you can roll back to a previous checkpoint for human-in-the-loop correction, and you can build recovery loops that resume a failed run instead of restarting it.</p>
+
+<h3>2. Episodic memory — experience trajectories</h3>
+
+<p>Episodic memory stores <em>what happened</em>, structured as trajectories: problem → action → observation → solution. This is the tier that lets an agent say "I have seen this before."</p>
+
+<p>The access pattern is similarity search, not lookup. You do not know the key of the relevant past incident — that is the whole point. You take the user's current query, embed it, and search for the episodes whose stored content lands nearby in vector space. A user reporting "the batch job keeps dying halfway through" should surface last month's out-of-memory incident even though not a single keyword matches.</p>
+
+<h3>3. Semantic memory — knowledge and profiles</h3>
+
+<p>Semantic memory stores <em>what is true</em>, stripped of the context in which it was learned. The user prefers AWS. Their primary stack is Python and FastAPI. They are a principal engineer. Their team's deployment window is Tuesday mornings.</p>
+
+<p>The distinction from episodic memory is worth being precise about, because it drives the retrieval strategy. An episode is a dated event you search by similarity. A semantic fact is a timeless assertion you fetch by key. You almost always want the user's profile on <em>every</em> turn, so fetching it directly by a known key is both cheaper and more reliable than hoping a vector search surfaces it.</p>
+
+<h3>4. Procedural memory — behaviour and heuristics</h3>
+
+<p>Procedural memory is the tier engineers tend not to think of as memory at all, because it lives in code rather than in a database. But it fits the definition: it is knowledge the agent retains across every execution, and it shapes behaviour without being re-derived each time.</p>
+
+<p>It includes the hardcoded graph topology (which node can follow which), the JSON schema contracts that validate tool arguments, the constraints on when a tool may fire, and the behavioural policies embedded in the system instructions. In the diagram it is drawn at the top, feeding downward, because it is the tier that constrains all the others.</p>
+
+<h2>How the data actually flows</h2>
+
+<p>Put the tiers in motion and you get a cycle, with working memory acting as the runtime execution kernel:</p>
+
+<ol>
+<li><strong>Ingress and pre-fetch.</strong> A user invokes the agent. Procedural guidelines format the system prompt. Working memory issues a semantic key-value lookup for the profile and a vector search across the episodic namespace.</li>
+<li><strong>Reasoning and tool execution.</strong> The model processes the assembled prompt. If information is missing or an action is required, it dispatches tool calls. Results — and errors — are folded back into working memory as observations.</li>
+<li><strong>Memory consolidation.</strong> As tasks resolve, dedicated consolidation steps (or tools the agent calls itself) write new facts into semantic memory and finished execution episodes into episodic memory.</li>
+</ol>
+
+<h3>The distinction that trips everyone up: checkpointer vs. store</h3>
+
+<p>If you take one implementation detail away from this post, make it this one. LangGraph gives you two different persistence mechanisms, and they are not interchangeable.</p>
+
+<p>A <strong>checkpointer</strong> (<code>MemorySaver</code>, <code>PostgresSaver</code>) is <em>thread-isolated runtime state persistence</em>. It serialises the full message history for one <code>thread_id</code>. It is how a conversation survives between turns. It is not how anything survives between conversations — open a new thread and the checkpointer gives you nothing.</p>
+
+<p>A <strong>BaseStore</strong> (<code>InMemoryStore</code>, <code>PostgresStore</code>) is <em>global, cross-thread hierarchical storage</em>, organised by <code>(namespace, key)</code> and optionally backed by a vector index. This is where long-term memory actually lives.</p>
+
+<p>Checkpointer for the conversation. Store for the memory. Reach for the wrong one and you will build an agent that either forgets everything the moment a session ends, or leaks one user's context into another's.</p>
+
+<h2>Implementation: vector-indexed semantic search</h2>
+
+<p>Start with the retrieval half. A <code>BaseStore</code> can embed specific fields on insertion, which turns it into a vector index you can run cosine similarity searches against via <code>store.search()</code>.</p>
+
+<div style="background:#282C34;border-radius:8px;padding:18px 20px;overflow-x:auto;margin:1.6em 0;"><pre style="margin:0;padding:0;background:transparent;border:0;color:#ABB2BF;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,&quot;Liberation Mono&quot;,monospace;font-size:13.5px;line-height:1.6;white-space:pre;overflow:visible;"><code style="background:transparent;color:inherit;font-family:inherit;font-size:inherit;padding:0;"><span style="color: #C678DD">from</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">langchain_openai</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">import</span> <span style="color: #E06C75">OpenAIEmbeddings</span>
+<span style="color: #C678DD">from</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">langgraph.store.memory</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">import</span> <span style="color: #E06C75">InMemoryStore</span>
+
+<span style="color: #7F848E"># Configure store with embedding index</span>
+<span style="color: #E06C75">embedding_model</span> <span style="color: #56B6C2">=</span> <span style="color: #E06C75">OpenAIEmbeddings</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">model</span><span style="color: #56B6C2">=</span><span style="color: #98C379">&quot;text-embedding-3-small&quot;</span><span style="color: #ABB2BF">)</span>
+<span style="color: #E06C75">long_term_store</span> <span style="color: #56B6C2">=</span> <span style="color: #E06C75">InMemoryStore</span><span style="color: #ABB2BF">(</span>
+    <span style="color: #E06C75">index</span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF">{</span>
+        <span style="color: #98C379">&quot;embeddings&quot;</span><span style="color: #ABB2BF">:</span> <span style="color: #E06C75">embedding_model</span><span style="color: #ABB2BF">,</span>
+        <span style="color: #98C379">&quot;dims&quot;</span><span style="color: #ABB2BF">:</span> <span style="color: #D19A66">1536</span><span style="color: #ABB2BF">,</span>
+        <span style="color: #98C379">&quot;fields&quot;</span><span style="color: #ABB2BF">:</span> <span style="color: #ABB2BF">[</span><span style="color: #98C379">&quot;content&quot;</span><span style="color: #ABB2BF">],</span>  <span style="color: #7F848E"># Automatically embeds the &#39;content&#39; field</span>
+    <span style="color: #ABB2BF">}</span>
+<span style="color: #ABB2BF">)</span>
+
+<span style="color: #7F848E"># Search across user&#39;s episodic or knowledge namespaces</span>
+<span style="color: #E06C75">results</span> <span style="color: #56B6C2">=</span> <span style="color: #E06C75">long_term_store</span><span style="color: #56B6C2">.</span><span style="color: #E06C75">search</span><span style="color: #ABB2BF">(</span>
+    <span style="color: #E06C75">namespace</span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF">(</span><span style="color: #98C379">&quot;users&quot;</span><span style="color: #ABB2BF">,</span> <span style="color: #98C379">&quot;user_101&quot;</span><span style="color: #ABB2BF">,</span> <span style="color: #98C379">&quot;knowledge&quot;</span><span style="color: #ABB2BF">),</span>
+    <span style="color: #E06C75">query</span><span style="color: #56B6C2">=</span><span style="color: #98C379">&quot;database configuration and replication&quot;</span><span style="color: #ABB2BF">,</span>
+    <span style="color: #E06C75">limit</span><span style="color: #56B6C2">=</span><span style="color: #D19A66">3</span>
+<span style="color: #ABB2BF">)</span>
+<span style="color: #C678DD">for</span> <span style="color: #E06C75">item</span> <span style="color: #56B6C2">in</span> <span style="color: #E06C75">results</span><span style="color: #ABB2BF">:</span>
+    <span style="color: #E5C07B">print</span><span style="color: #ABB2BF">(</span><span style="color: #98C379">f&quot;Match score: {</span><span style="color: #E06C75">item</span><span style="color: #56B6C2">.</span><span style="color: #E06C75">score</span><span style="color: #98C379">:.2f} | Content: {</span><span style="color: #E06C75">item</span><span style="color: #56B6C2">.</span><span style="color: #E06C75">value</span><span style="color: #ABB2BF">[</span><span style="color: #98C379">&#39;content&#39;</span><span style="color: #ABB2BF">]</span><span style="color: #98C379">}&quot;</span><span style="color: #ABB2BF">)</span></code></pre></div>
+
+<p>Three parameters in that <code>index</code> block are doing all the work. <code>embeddings</code> names the model. <code>dims</code> must match that model's output dimensionality — 1536 for <code>text-embedding-3-small</code> — and getting it wrong fails at insertion time. <code>fields</code> is the interesting one: it tells the store which keys inside your stored dictionary to actually embed. Here only <code>content</code> is indexed, so you can attach arbitrary metadata to the same record (timestamps, severity, ticket IDs) without polluting the vector.</p>
+
+<p>Note the <code>namespace</code> tuple. It is hierarchical, and it is your isolation boundary — <code>("users", "user_101", "knowledge")</code> scopes the search to one user's knowledge and nothing else.</p>
+
+<h2>Implementation: all four tiers in one LangGraph agent</h2>
+
+<p>Now the full build. It integrates all four memory models, on-demand tool calling via <code>InjectedStore</code>, and persistent checkpointing.</p>
+
+<h3>Procedural memory as explicit policy</h3>
+
+<div style="background:#282C34;border-radius:8px;padding:18px 20px;overflow-x:auto;margin:1.6em 0;"><pre style="margin:0;padding:0;background:transparent;border:0;color:#ABB2BF;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,&quot;Liberation Mono&quot;,monospace;font-size:13.5px;line-height:1.6;white-space:pre;overflow:visible;"><code style="background:transparent;color:inherit;font-family:inherit;font-size:inherit;padding:0;"><span style="color: #C678DD">import</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">uuid</span>
+<span style="color: #C678DD">from</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">typing</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">import</span> <span style="color: #E06C75">Annotated</span><span style="color: #ABB2BF">,</span> <span style="color: #E06C75">TypedDict</span>
+<span style="color: #C678DD">from</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">langchain_core.messages</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">import</span> <span style="color: #E06C75">BaseMessage</span><span style="color: #ABB2BF">,</span> <span style="color: #E06C75">HumanMessage</span><span style="color: #ABB2BF">,</span> <span style="color: #E06C75">SystemMessage</span>
+<span style="color: #C678DD">from</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">langchain_core.runnables</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">import</span> <span style="color: #E06C75">RunnableConfig</span>
+<span style="color: #C678DD">from</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">langchain_core.tools</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">import</span> <span style="color: #E06C75">tool</span>
+<span style="color: #C678DD">from</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">langchain_openai</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">import</span> <span style="color: #E06C75">ChatOpenAI</span><span style="color: #ABB2BF">,</span> <span style="color: #E06C75">OpenAIEmbeddings</span>
+<span style="color: #C678DD">from</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">langgraph.checkpoint.memory</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">import</span> <span style="color: #E06C75">MemorySaver</span>
+<span style="color: #C678DD">from</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">langgraph.graph</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">import</span> <span style="color: #E06C75">END</span><span style="color: #ABB2BF">,</span> <span style="color: #E06C75">START</span><span style="color: #ABB2BF">,</span> <span style="color: #E06C75">StateGraph</span>
+<span style="color: #C678DD">from</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">langgraph.graph.message</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">import</span> <span style="color: #E06C75">add_messages</span>
+<span style="color: #C678DD">from</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">langgraph.prebuilt</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">import</span> <span style="color: #E06C75">InjectedStore</span><span style="color: #ABB2BF">,</span> <span style="color: #E06C75">ToolNode</span><span style="color: #ABB2BF">,</span> <span style="color: #E06C75">tools_condition</span>
+<span style="color: #C678DD">from</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">langgraph.store.base</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">import</span> <span style="color: #E06C75">BaseStore</span>
+<span style="color: #C678DD">from</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">langgraph.store.memory</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">import</span> <span style="color: #E06C75">InMemoryStore</span>
+
+<span style="color: #7F848E"># --- 4. PROCEDURAL MEMORY (Behavioral Rules &amp; Policies) ---</span>
+<span style="color: #E06C75">PROCEDURAL_GUIDELINES</span> <span style="color: #56B6C2">=</span> <span style="color: #ABB2BF">(</span>
+    <span style="color: #98C379">&quot;You are an enterprise AI assistant. Adhere strictly to these procedural rules:\n&quot;</span>
+    <span style="color: #98C379">&quot;1. Always format responses using technical, concise bullet points.\n&quot;</span>
+    <span style="color: #98C379">&quot;2. Consult episodic memory when addressing system crashes or infrastructure issues.\n&quot;</span>
+    <span style="color: #98C379">&quot;3. Adhere strictly to user technical preferences stored in semantic memory.&quot;</span>
+<span style="color: #ABB2BF">)</span></code></pre></div>
+
+<p>Procedural memory here is just a module-level constant — and that is the point. It is version-controlled, diffable, and reviewable. Rule 2 is quietly the most important line in the block: it is a routing instruction that tells the model <em>when</em> episodic recall is relevant, which is what stops the agent from either ignoring its history or dredging it up on every trivial turn.</p>
+
+<h3>Episodic and semantic memory as tools</h3>
+
+<div style="background:#282C34;border-radius:8px;padding:18px 20px;overflow-x:auto;margin:1.6em 0;"><pre style="margin:0;padding:0;background:transparent;border:0;color:#ABB2BF;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,&quot;Liberation Mono&quot;,monospace;font-size:13.5px;line-height:1.6;white-space:pre;overflow:visible;"><code style="background:transparent;color:inherit;font-family:inherit;font-size:inherit;padding:0;"><span style="color: #7F848E"># --- 2. EPISODIC &amp; 3. SEMANTIC MEMORY TOOLS ---</span>
+<span style="color: #61AFEF">@tool</span>
+<span style="color: #C678DD">def</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">record_resolved_episode</span><span style="color: #ABB2BF">(</span>
+    <span style="color: #E06C75">problem</span><span style="color: #ABB2BF">:</span> <span style="color: #E5C07B">str</span><span style="color: #ABB2BF">,</span>
+    <span style="color: #E06C75">solution</span><span style="color: #ABB2BF">:</span> <span style="color: #E5C07B">str</span><span style="color: #ABB2BF">,</span>
+    <span style="color: #56B6C2">*</span><span style="color: #ABB2BF">,</span>
+    <span style="color: #E06C75">config</span><span style="color: #ABB2BF">:</span> <span style="color: #E06C75">RunnableConfig</span><span style="color: #ABB2BF">,</span>
+    <span style="color: #E06C75">store</span><span style="color: #ABB2BF">:</span> <span style="color: #E06C75">Annotated</span><span style="color: #ABB2BF">[</span><span style="color: #E06C75">BaseStore</span><span style="color: #ABB2BF">,</span> <span style="color: #E06C75">InjectedStore</span><span style="color: #ABB2BF">()],</span>
+<span style="color: #ABB2BF">)</span> <span style="color: #56B6C2">-&gt;</span> <span style="color: #E5C07B">str</span><span style="color: #ABB2BF">:</span>
+<span style="color: #ABB2BF">    </span><span style="color: #98C379">&quot;&quot;&quot;Saves a resolved technical incident/task into episodic memory for future recall.&quot;&quot;&quot;</span>
+    <span style="color: #E06C75">user_id</span> <span style="color: #56B6C2">=</span> <span style="color: #E06C75">config</span><span style="color: #56B6C2">.</span><span style="color: #E06C75">get</span><span style="color: #ABB2BF">(</span><span style="color: #98C379">&quot;configurable&quot;</span><span style="color: #ABB2BF">,</span> <span style="color: #ABB2BF">{})</span><span style="color: #56B6C2">.</span><span style="color: #E06C75">get</span><span style="color: #ABB2BF">(</span><span style="color: #98C379">&quot;user_id&quot;</span><span style="color: #ABB2BF">,</span> <span style="color: #98C379">&quot;default_user&quot;</span><span style="color: #ABB2BF">)</span>
+    <span style="color: #E06C75">namespace</span> <span style="color: #56B6C2">=</span> <span style="color: #ABB2BF">(</span><span style="color: #98C379">&quot;users&quot;</span><span style="color: #ABB2BF">,</span> <span style="color: #E06C75">user_id</span><span style="color: #ABB2BF">,</span> <span style="color: #98C379">&quot;episodic_memory&quot;</span><span style="color: #ABB2BF">)</span>
+    <span style="color: #E06C75">entry</span> <span style="color: #56B6C2">=</span> <span style="color: #98C379">f&quot;Problem: {</span><span style="color: #E06C75">problem</span><span style="color: #98C379">} | Solution: {</span><span style="color: #E06C75">solution</span><span style="color: #98C379">}&quot;</span>
+    <span style="color: #E06C75">store</span><span style="color: #56B6C2">.</span><span style="color: #E06C75">put</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">namespace</span><span style="color: #ABB2BF">,</span> <span style="color: #E06C75">key</span><span style="color: #56B6C2">=</span><span style="color: #E5C07B">str</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">uuid</span><span style="color: #56B6C2">.</span><span style="color: #E06C75">uuid4</span><span style="color: #ABB2BF">()),</span> <span style="color: #E06C75">value</span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF">{</span><span style="color: #98C379">&quot;content&quot;</span><span style="color: #ABB2BF">:</span> <span style="color: #E06C75">entry</span><span style="color: #ABB2BF">})</span>
+    <span style="color: #C678DD">return</span> <span style="color: #98C379">f&quot;Successfully saved episodic memory: {</span><span style="color: #E06C75">problem</span><span style="color: #98C379">}&quot;</span>
+
+<span style="color: #61AFEF">@tool</span>
+<span style="color: #C678DD">def</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">update_user_profile_fact</span><span style="color: #ABB2BF">(</span>
+    <span style="color: #E06C75">preference_key</span><span style="color: #ABB2BF">:</span> <span style="color: #E5C07B">str</span><span style="color: #ABB2BF">,</span>
+    <span style="color: #E06C75">value</span><span style="color: #ABB2BF">:</span> <span style="color: #E5C07B">str</span><span style="color: #ABB2BF">,</span>
+    <span style="color: #56B6C2">*</span><span style="color: #ABB2BF">,</span>
+    <span style="color: #E06C75">config</span><span style="color: #ABB2BF">:</span> <span style="color: #E06C75">RunnableConfig</span><span style="color: #ABB2BF">,</span>
+    <span style="color: #E06C75">store</span><span style="color: #ABB2BF">:</span> <span style="color: #E06C75">Annotated</span><span style="color: #ABB2BF">[</span><span style="color: #E06C75">BaseStore</span><span style="color: #ABB2BF">,</span> <span style="color: #E06C75">InjectedStore</span><span style="color: #ABB2BF">()],</span>
+<span style="color: #ABB2BF">)</span> <span style="color: #56B6C2">-&gt;</span> <span style="color: #E5C07B">str</span><span style="color: #ABB2BF">:</span>
+<span style="color: #ABB2BF">    </span><span style="color: #98C379">&quot;&quot;&quot;Updates semantic profile memory (e.g. language preferences, tech stack).&quot;&quot;&quot;</span>
+    <span style="color: #E06C75">user_id</span> <span style="color: #56B6C2">=</span> <span style="color: #E06C75">config</span><span style="color: #56B6C2">.</span><span style="color: #E06C75">get</span><span style="color: #ABB2BF">(</span><span style="color: #98C379">&quot;configurable&quot;</span><span style="color: #ABB2BF">,</span> <span style="color: #ABB2BF">{})</span><span style="color: #56B6C2">.</span><span style="color: #E06C75">get</span><span style="color: #ABB2BF">(</span><span style="color: #98C379">&quot;user_id&quot;</span><span style="color: #ABB2BF">,</span> <span style="color: #98C379">&quot;default_user&quot;</span><span style="color: #ABB2BF">)</span>
+    <span style="color: #E06C75">namespace</span> <span style="color: #56B6C2">=</span> <span style="color: #ABB2BF">(</span><span style="color: #98C379">&quot;users&quot;</span><span style="color: #ABB2BF">,</span> <span style="color: #E06C75">user_id</span><span style="color: #ABB2BF">,</span> <span style="color: #98C379">&quot;semantic_profile&quot;</span><span style="color: #ABB2BF">)</span>
+    <span style="color: #E06C75">current_item</span> <span style="color: #56B6C2">=</span> <span style="color: #E06C75">store</span><span style="color: #56B6C2">.</span><span style="color: #E06C75">get</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">namespace</span><span style="color: #ABB2BF">,</span> <span style="color: #98C379">&quot;profile&quot;</span><span style="color: #ABB2BF">)</span>
+    <span style="color: #E06C75">profile</span> <span style="color: #56B6C2">=</span> <span style="color: #E06C75">current_item</span><span style="color: #56B6C2">.</span><span style="color: #E06C75">value</span> <span style="color: #C678DD">if</span> <span style="color: #E06C75">current_item</span> <span style="color: #C678DD">else</span> <span style="color: #ABB2BF">{}</span>
+    <span style="color: #E06C75">profile</span><span style="color: #ABB2BF">[</span><span style="color: #E06C75">preference_key</span><span style="color: #ABB2BF">]</span> <span style="color: #56B6C2">=</span> <span style="color: #E06C75">value</span>
+    <span style="color: #E06C75">store</span><span style="color: #56B6C2">.</span><span style="color: #E06C75">put</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">namespace</span><span style="color: #ABB2BF">,</span> <span style="color: #E06C75">key</span><span style="color: #56B6C2">=</span><span style="color: #98C379">&quot;profile&quot;</span><span style="color: #ABB2BF">,</span> <span style="color: #E06C75">value</span><span style="color: #56B6C2">=</span><span style="color: #E06C75">profile</span><span style="color: #ABB2BF">)</span>
+    <span style="color: #C678DD">return</span> <span style="color: #98C379">f&quot;Updated user preference: {</span><span style="color: #E06C75">preference_key</span><span style="color: #98C379">} = {</span><span style="color: #E06C75">value</span><span style="color: #98C379">}&quot;</span>
+
+<span style="color: #E06C75">tools</span> <span style="color: #56B6C2">=</span> <span style="color: #ABB2BF">[</span><span style="color: #E06C75">record_resolved_episode</span><span style="color: #ABB2BF">,</span> <span style="color: #E06C75">update_user_profile_fact</span><span style="color: #ABB2BF">]</span></code></pre></div>
+
+<p>This is memory consolidation implemented as tool calls — the agent decides when something is worth remembering. Two mechanisms deserve attention.</p>
+
+<p><code>Annotated[BaseStore, InjectedStore()]</code> is the critical piece. It marks <code>store</code> as a runtime-injected dependency, which means the parameter is <em>hidden from the model's tool schema</em>. The model sees a tool that takes <code>problem</code> and <code>solution</code>; the framework supplies the store handle. Without this you would be asking an LLM to hallucinate a database connection.</p>
+
+<p>The keyword-only marker <code>*</code> enforces that split at the signature level: everything before it is model-supplied, everything after is runtime-supplied.</p>
+
+<p>Also notice the difference in write strategy between the two tools, which mirrors the difference between the tiers. Episodes are written under a fresh <code>uuid4()</code> — every incident is a new, immutable record, because history is append-only. The profile is written under the fixed key <code>"profile"</code> after a read-modify-write — facts get updated in place, because you want the current truth, not a pile of contradictory snapshots.</p>
+
+<h3>Working memory and the store</h3>
+
+<div style="background:#282C34;border-radius:8px;padding:18px 20px;overflow-x:auto;margin:1.6em 0;"><pre style="margin:0;padding:0;background:transparent;border:0;color:#ABB2BF;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,&quot;Liberation Mono&quot;,monospace;font-size:13.5px;line-height:1.6;white-space:pre;overflow:visible;"><code style="background:transparent;color:inherit;font-family:inherit;font-size:inherit;padding:0;"><span style="color: #7F848E"># --- 1. WORKING / SHORT-TERM MEMORY (State Definition) ---</span>
+<span style="color: #C678DD">class</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">AgentState</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">TypedDict</span><span style="color: #ABB2BF">):</span>
+    <span style="color: #E06C75">messages</span><span style="color: #ABB2BF">:</span> <span style="color: #E06C75">Annotated</span><span style="color: #ABB2BF">[</span><span style="color: #E5C07B">list</span><span style="color: #ABB2BF">[</span><span style="color: #E06C75">BaseMessage</span><span style="color: #ABB2BF">],</span> <span style="color: #E06C75">add_messages</span><span style="color: #ABB2BF">]</span>
+
+<span style="color: #7F848E"># Vector-indexed store for Episodic and Semantic lookups</span>
+<span style="color: #E06C75">long_term_store</span> <span style="color: #56B6C2">=</span> <span style="color: #E06C75">InMemoryStore</span><span style="color: #ABB2BF">(</span>
+    <span style="color: #E06C75">index</span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF">{</span>
+        <span style="color: #98C379">&quot;embeddings&quot;</span><span style="color: #ABB2BF">:</span> <span style="color: #E06C75">OpenAIEmbeddings</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">model</span><span style="color: #56B6C2">=</span><span style="color: #98C379">&quot;text-embedding-3-small&quot;</span><span style="color: #ABB2BF">),</span>
+        <span style="color: #98C379">&quot;dims&quot;</span><span style="color: #ABB2BF">:</span> <span style="color: #D19A66">1536</span><span style="color: #ABB2BF">,</span>
+        <span style="color: #98C379">&quot;fields&quot;</span><span style="color: #ABB2BF">:</span> <span style="color: #ABB2BF">[</span><span style="color: #98C379">&quot;content&quot;</span><span style="color: #ABB2BF">],</span>
+    <span style="color: #ABB2BF">}</span>
+<span style="color: #ABB2BF">)</span>
+
+<span style="color: #7F848E"># Seed Long-Term Memories</span>
+<span style="color: #E06C75">long_term_store</span><span style="color: #56B6C2">.</span><span style="color: #E06C75">put</span><span style="color: #ABB2BF">(</span>
+    <span style="color: #E06C75">namespace</span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF">(</span><span style="color: #98C379">&quot;users&quot;</span><span style="color: #ABB2BF">,</span> <span style="color: #98C379">&quot;engineer_01&quot;</span><span style="color: #ABB2BF">,</span> <span style="color: #98C379">&quot;semantic_profile&quot;</span><span style="color: #ABB2BF">),</span>
+    <span style="color: #E06C75">key</span><span style="color: #56B6C2">=</span><span style="color: #98C379">&quot;profile&quot;</span><span style="color: #ABB2BF">,</span>
+    <span style="color: #E06C75">value</span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF">{</span><span style="color: #98C379">&quot;preferred_cloud&quot;</span><span style="color: #ABB2BF">:</span> <span style="color: #98C379">&quot;AWS&quot;</span><span style="color: #ABB2BF">,</span> <span style="color: #98C379">&quot;primary_stack&quot;</span><span style="color: #ABB2BF">:</span> <span style="color: #98C379">&quot;Python/FastAPI&quot;</span><span style="color: #ABB2BF">,</span> <span style="color: #98C379">&quot;role&quot;</span><span style="color: #ABB2BF">:</span> <span style="color: #98C379">&quot;Principal Engineer&quot;</span><span style="color: #ABB2BF">}</span>
+<span style="color: #ABB2BF">)</span>
+<span style="color: #E06C75">long_term_store</span><span style="color: #56B6C2">.</span><span style="color: #E06C75">put</span><span style="color: #ABB2BF">(</span>
+    <span style="color: #E06C75">namespace</span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF">(</span><span style="color: #98C379">&quot;users&quot;</span><span style="color: #ABB2BF">,</span> <span style="color: #98C379">&quot;engineer_01&quot;</span><span style="color: #ABB2BF">,</span> <span style="color: #98C379">&quot;episodic_memory&quot;</span><span style="color: #ABB2BF">),</span>
+    <span style="color: #E06C75">key</span><span style="color: #56B6C2">=</span><span style="color: #E5C07B">str</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">uuid</span><span style="color: #56B6C2">.</span><span style="color: #E06C75">uuid4</span><span style="color: #ABB2BF">()),</span>
+    <span style="color: #E06C75">value</span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF">{</span><span style="color: #98C379">&quot;content&quot;</span><span style="color: #ABB2BF">:</span> <span style="color: #98C379">&quot;Problem: ECS task OOM during batch run | Solution: Increased Fargate memory to 4GB and reduced chunk size to 500 records.&quot;</span><span style="color: #ABB2BF">}</span>
+<span style="color: #ABB2BF">)</span></code></pre></div>
+
+<p>Working memory is a four-line <code>TypedDict</code>. The <code>add_messages</code> reducer in the <code>Annotated</code> type is what makes it behave correctly: node returns are <em>appended</em> to the message list rather than replacing it, and messages sharing an ID are updated in place. Swap that reducer out and every node would clobber the entire conversation.</p>
+
+<p>The seeded records are worth reading closely, because they show the two shapes long-term memory takes. The profile is a structured dictionary of typed fields, fetched by key. The episode is a single flat <code>content</code> string — deliberately, since <code>content</code> is the field being embedded, and cramming the problem and its solution into one string means a similarity hit on the problem retrieves the fix along with it.</p>
+
+<h3>The reasoning node: assembling context</h3>
+
+<div style="background:#282C34;border-radius:8px;padding:18px 20px;overflow-x:auto;margin:1.6em 0;"><pre style="margin:0;padding:0;background:transparent;border:0;color:#ABB2BF;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,&quot;Liberation Mono&quot;,monospace;font-size:13.5px;line-height:1.6;white-space:pre;overflow:visible;"><code style="background:transparent;color:inherit;font-family:inherit;font-size:inherit;padding:0;"><span style="color: #7F848E"># --- AGENT REASONING NODE ---</span>
+<span style="color: #E06C75">model</span> <span style="color: #56B6C2">=</span> <span style="color: #E06C75">ChatOpenAI</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">model</span><span style="color: #56B6C2">=</span><span style="color: #98C379">&quot;gpt-4o&quot;</span><span style="color: #ABB2BF">,</span> <span style="color: #E06C75">temperature</span><span style="color: #56B6C2">=</span><span style="color: #D19A66">0</span><span style="color: #ABB2BF">)</span><span style="color: #56B6C2">.</span><span style="color: #E06C75">bind_tools</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">tools</span><span style="color: #ABB2BF">)</span>
+
+<span style="color: #C678DD">def</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">agent_node</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">state</span><span style="color: #ABB2BF">:</span> <span style="color: #E06C75">AgentState</span><span style="color: #ABB2BF">,</span> <span style="color: #E06C75">config</span><span style="color: #ABB2BF">:</span> <span style="color: #E5C07B">dict</span><span style="color: #ABB2BF">,</span> <span style="color: #56B6C2">*</span><span style="color: #ABB2BF">,</span> <span style="color: #E06C75">store</span><span style="color: #ABB2BF">:</span> <span style="color: #E06C75">BaseStore</span><span style="color: #ABB2BF">)</span> <span style="color: #56B6C2">-&gt;</span> <span style="color: #E5C07B">dict</span><span style="color: #ABB2BF">:</span>
+    <span style="color: #E06C75">user_id</span> <span style="color: #56B6C2">=</span> <span style="color: #E06C75">config</span><span style="color: #ABB2BF">[</span><span style="color: #98C379">&quot;configurable&quot;</span><span style="color: #ABB2BF">]</span><span style="color: #56B6C2">.</span><span style="color: #E06C75">get</span><span style="color: #ABB2BF">(</span><span style="color: #98C379">&quot;user_id&quot;</span><span style="color: #ABB2BF">,</span> <span style="color: #98C379">&quot;default_user&quot;</span><span style="color: #ABB2BF">)</span>
+    <span style="color: #E06C75">latest_query</span> <span style="color: #56B6C2">=</span> <span style="color: #E06C75">state</span><span style="color: #ABB2BF">[</span><span style="color: #98C379">&quot;messages&quot;</span><span style="color: #ABB2BF">][</span><span style="color: #56B6C2">-</span><span style="color: #D19A66">1</span><span style="color: #ABB2BF">]</span><span style="color: #56B6C2">.</span><span style="color: #E06C75">content</span>
+
+    <span style="color: #7F848E"># Retrieve Semantic Memory (Profile)</span>
+    <span style="color: #E06C75">profile_item</span> <span style="color: #56B6C2">=</span> <span style="color: #E06C75">store</span><span style="color: #56B6C2">.</span><span style="color: #E06C75">get</span><span style="color: #ABB2BF">((</span><span style="color: #98C379">&quot;users&quot;</span><span style="color: #ABB2BF">,</span> <span style="color: #E06C75">user_id</span><span style="color: #ABB2BF">,</span> <span style="color: #98C379">&quot;semantic_profile&quot;</span><span style="color: #ABB2BF">),</span> <span style="color: #98C379">&quot;profile&quot;</span><span style="color: #ABB2BF">)</span>
+    <span style="color: #E06C75">user_profile</span> <span style="color: #56B6C2">=</span> <span style="color: #E06C75">profile_item</span><span style="color: #56B6C2">.</span><span style="color: #E06C75">value</span> <span style="color: #C678DD">if</span> <span style="color: #E06C75">profile_item</span> <span style="color: #C678DD">else</span> <span style="color: #ABB2BF">{}</span>
+
+    <span style="color: #7F848E"># Retrieve Episodic Memory (Semantic Vector Search)</span>
+    <span style="color: #E06C75">past_episodes</span> <span style="color: #56B6C2">=</span> <span style="color: #E06C75">store</span><span style="color: #56B6C2">.</span><span style="color: #E06C75">search</span><span style="color: #ABB2BF">(</span>
+        <span style="color: #E06C75">namespace</span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF">(</span><span style="color: #98C379">&quot;users&quot;</span><span style="color: #ABB2BF">,</span> <span style="color: #E06C75">user_id</span><span style="color: #ABB2BF">,</span> <span style="color: #98C379">&quot;episodic_memory&quot;</span><span style="color: #ABB2BF">),</span>
+        <span style="color: #E06C75">query</span><span style="color: #56B6C2">=</span><span style="color: #E06C75">latest_query</span><span style="color: #ABB2BF">,</span>
+        <span style="color: #E06C75">limit</span><span style="color: #56B6C2">=</span><span style="color: #D19A66">2</span>
+    <span style="color: #ABB2BF">)</span>
+    <span style="color: #E06C75">episodes_str</span> <span style="color: #56B6C2">=</span> <span style="color: #98C379">&quot;\n&quot;</span><span style="color: #56B6C2">.</span><span style="color: #E06C75">join</span><span style="color: #ABB2BF">([</span><span style="color: #98C379">f&quot;- {</span><span style="color: #E06C75">ep</span><span style="color: #56B6C2">.</span><span style="color: #E06C75">value</span><span style="color: #56B6C2">.</span><span style="color: #E06C75">get</span><span style="color: #ABB2BF">(</span><span style="color: #98C379">&#39;content&#39;</span><span style="color: #ABB2BF">)</span><span style="color: #98C379">}&quot;</span> <span style="color: #C678DD">for</span> <span style="color: #E06C75">ep</span> <span style="color: #56B6C2">in</span> <span style="color: #E06C75">past_episodes</span><span style="color: #ABB2BF">])</span> <span style="color: #56B6C2">or</span> <span style="color: #98C379">&quot;None found.&quot;</span>
+
+    <span style="color: #7F848E"># Construct context-enriched working prompt</span>
+    <span style="color: #E06C75">full_prompt</span> <span style="color: #56B6C2">=</span> <span style="color: #ABB2BF">(</span>
+        <span style="color: #98C379">f&quot;{</span><span style="color: #E06C75">PROCEDURAL_GUIDELINES</span><span style="color: #98C379">}\n\n&quot;</span>
+        <span style="color: #98C379">f&quot;--- USER PROFILE (Semantic Memory) ---\n{</span><span style="color: #E06C75">user_profile</span><span style="color: #98C379">}\n\n&quot;</span>
+        <span style="color: #98C379">f&quot;--- RELEVANT EPISODES (Episodic Memory) ---\n{</span><span style="color: #E06C75">episodes_str</span><span style="color: #98C379">}\n&quot;</span>
+    <span style="color: #ABB2BF">)</span>
+
+    <span style="color: #E06C75">response</span> <span style="color: #56B6C2">=</span> <span style="color: #E06C75">model</span><span style="color: #56B6C2">.</span><span style="color: #E06C75">invoke</span><span style="color: #ABB2BF">([</span><span style="color: #E06C75">SystemMessage</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">content</span><span style="color: #56B6C2">=</span><span style="color: #E06C75">full_prompt</span><span style="color: #ABB2BF">)]</span> <span style="color: #56B6C2">+</span> <span style="color: #E06C75">state</span><span style="color: #ABB2BF">[</span><span style="color: #98C379">&quot;messages&quot;</span><span style="color: #ABB2BF">])</span>
+    <span style="color: #C678DD">return</span> <span style="color: #ABB2BF">{</span><span style="color: #98C379">&quot;messages&quot;</span><span style="color: #ABB2BF">:</span> <span style="color: #ABB2BF">[</span><span style="color: #E06C75">response</span><span style="color: #ABB2BF">]}</span></code></pre></div>
+
+<p>This function is the diagram's centre box in code. Every arrow pointing into working memory shows up here as a line.</p>
+
+<p>The two retrievals use deliberately different access patterns — <code>store.get()</code> for the profile because you know the key, <code>store.search()</code> for episodes because you do not. The search query is the user's latest message, so recall is driven by whatever they just asked about.</p>
+
+<p><code>limit=2</code> is a context-budget decision, not an arbitrary number. Episodes are unbounded and growing; the prompt is not. Two is a reasonable ceiling for keeping the most relevant history in-context without crowding out the actual conversation.</p>
+
+<p>Two robustness details that are easy to miss: <code>or "None found."</code> guarantees the prompt section is never blank, which keeps the format stable on a cold-start user. And the final <code>invoke</code> prepends a freshly built <code>SystemMessage</code> to the existing message history rather than mutating state — memory context is reassembled on every single turn, so it always reflects the current store.</p>
+
+<h3>Wiring the graph</h3>
+
+<div style="background:#282C34;border-radius:8px;padding:18px 20px;overflow-x:auto;margin:1.6em 0;"><pre style="margin:0;padding:0;background:transparent;border:0;color:#ABB2BF;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,&quot;Liberation Mono&quot;,monospace;font-size:13.5px;line-height:1.6;white-space:pre;overflow:visible;"><code style="background:transparent;color:inherit;font-family:inherit;font-size:inherit;padding:0;"><span style="color: #7F848E"># --- GRAPH COMPILATION ---</span>
+<span style="color: #E06C75">builder</span> <span style="color: #56B6C2">=</span> <span style="color: #E06C75">StateGraph</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">AgentState</span><span style="color: #ABB2BF">)</span>
+<span style="color: #E06C75">builder</span><span style="color: #56B6C2">.</span><span style="color: #E06C75">add_node</span><span style="color: #ABB2BF">(</span><span style="color: #98C379">&quot;agent&quot;</span><span style="color: #ABB2BF">,</span> <span style="color: #E06C75">agent_node</span><span style="color: #ABB2BF">)</span>
+<span style="color: #E06C75">builder</span><span style="color: #56B6C2">.</span><span style="color: #E06C75">add_node</span><span style="color: #ABB2BF">(</span><span style="color: #98C379">&quot;tools&quot;</span><span style="color: #ABB2BF">,</span> <span style="color: #E06C75">ToolNode</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">tools</span><span style="color: #ABB2BF">))</span>
+
+<span style="color: #E06C75">builder</span><span style="color: #56B6C2">.</span><span style="color: #E06C75">add_edge</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">START</span><span style="color: #ABB2BF">,</span> <span style="color: #98C379">&quot;agent&quot;</span><span style="color: #ABB2BF">)</span>
+<span style="color: #E06C75">builder</span><span style="color: #56B6C2">.</span><span style="color: #E06C75">add_conditional_edges</span><span style="color: #ABB2BF">(</span><span style="color: #98C379">&quot;agent&quot;</span><span style="color: #ABB2BF">,</span> <span style="color: #E06C75">tools_condition</span><span style="color: #ABB2BF">)</span>
+<span style="color: #E06C75">builder</span><span style="color: #56B6C2">.</span><span style="color: #E06C75">add_edge</span><span style="color: #ABB2BF">(</span><span style="color: #98C379">&quot;tools&quot;</span><span style="color: #ABB2BF">,</span> <span style="color: #98C379">&quot;agent&quot;</span><span style="color: #ABB2BF">)</span>
+
+<span style="color: #E06C75">short_term_checkpointer</span> <span style="color: #56B6C2">=</span> <span style="color: #E06C75">MemorySaver</span><span style="color: #ABB2BF">()</span>
+<span style="color: #E06C75">app</span> <span style="color: #56B6C2">=</span> <span style="color: #E06C75">builder</span><span style="color: #56B6C2">.</span><span style="color: #E06C75">compile</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">checkpointer</span><span style="color: #56B6C2">=</span><span style="color: #E06C75">short_term_checkpointer</span><span style="color: #ABB2BF">,</span> <span style="color: #E06C75">store</span><span style="color: #56B6C2">=</span><span style="color: #E06C75">long_term_store</span><span style="color: #ABB2BF">)</span></code></pre></div>
+
+<p>The topology is the classic ReAct loop, and it is itself procedural memory — the graph structure encodes the permitted control flow. <code>tools_condition</code> inspects the model's output and routes to the tool node if tool calls were emitted, or to <code>END</code> if not. The edge from <code>tools</code> back to <code>agent</code> closes the loop so the model can reason over its own observations.</p>
+
+<p>The last line is where the checkpointer/store distinction becomes concrete: <code>compile()</code> takes both, as separate arguments, because they solve separate problems. <code>checkpointer</code> persists this thread. <code>store</code> persists everything that must outlive it.</p>
+
+<h2>Production hardening</h2>
+
+<p>The code above is a working reference, not a production deployment. Three things need attention before it becomes one.</p>
+
+<p><strong>Namespacing strategy.</strong> Maintain distinct namespaces for distinct data scopes — <code>("users", user_id, "profile")</code> for personal data, <code>("teams", org_id, "policies")</code> for shared knowledge. The namespace hierarchy is your access-control boundary, so design it before you have data in it. Retrofitting a namespace scheme onto a populated store is a migration.</p>
+
+<p><strong>Memory eviction and compaction.</strong> Episodic stores grow without bound, and an unbounded store gets slower and noisier simultaneously — more low-value episodes competing for the same top-<em>k</em> slots. Prune low-utility episodes, or aggregate repeated runs into generalised SOP documents. Compaction is not merely a cost measure; consolidating fifty near-identical incidents into one procedure genuinely improves retrieval quality.</p>
+
+<p><strong>Asynchronous store operations.</strong> <code>InMemoryStore</code> is for development. Under real throughput, use <code>AsyncPostgresStore</code> with connection pooling — every memory search is network I/O plus an embedding call, and doing that synchronously blocks the event loop on each turn.</p>
+
+<h2>Where the research is going: arXiv, mid-2026</h2>
+
+<p>The architecture above is the stable, buildable core. The research frontier has moved past it — and interestingly, almost none of the recent work is about better embeddings. Nearly all of it is about the parts this post flagged as "production hardening": what you admit into memory, what you do when stored facts go stale, and what happens when someone writes to your store on purpose.</p>
+
+<p>Here is what has landed on arXiv over the past few months. These are preprints, so treat the numbers as directional rather than settled.</p>
+
+<h3>1. Consolidation is moving to write time</h3>
+
+<p>The reference implementation above writes whatever the agent decides to write. The emerging consensus is that this is the wrong place to make the decision — filtering at read time means you have already paid the storage and retrieval-noise cost.</p>
+
+<p><a href="https://arxiv.org/abs/2608.22215"><strong>Dual-Layer Agentic Memory with Fast Write Routing and Slow Consolidation</strong></a> (arXiv:2608.22215) argues the core challenge is not retrieval but managing the knowledge lifecycle: deciding what to externalise, update, or eventually internalise. It classifies incoming information as <em>non-write</em>, <em>write-new</em>, or <em>write-update</em>, routed through a small-to-large model cascade so the triage itself stays cheap, with periodic parametric consolidation behind it. The framing is borrowed from Complementary Learning Systems theory in neuroscience — fast episodic capture, slow consolidation into generalised knowledge.</p>
+
+<p><a href="https://arxiv.org/abs/2608.21867"><strong>MemGuard</strong></a> (arXiv:2608.21867) attacks the same problem from the admission side, naming two failure modes: <em>unreliable admission</em> (failed trajectories and accidental successes enter memory because they look relevant, then mislead later decisions) and <em>memory drift</em> (banks accumulate duplicate, stale, and conflicting records that retrieval alone cannot repair). Its move is to keep verifier output as persistent lifecycle metadata — reward, confidence, label, uncertainty attached to every record — rather than using it as a one-shot filter at the door.</p>
+
+<p><a href="https://arxiv.org/abs/2608.25329"><strong>HiPS</strong></a> (arXiv:2608.25329) makes the retain/compress/discard policy itself learned rather than fixed, splitting it into a globally shared foundation and a user-specific adaptive tier — on the observation that the optimal memory decision is user-specific and shifts as the policy trains.</p>
+
+<h3>2. Staleness, not recall, is the dominant failure mode</h3>
+
+<p>This is the most consistent theme in the recent literature, and it maps directly onto the read-modify-write pattern in the <code>update_user_profile_fact</code> tool above. Overwriting a fact is easy. Knowing that a stored fact has been superseded is not.</p>
+
+<p><a href="https://arxiv.org/abs/2608.19652"><strong>Can Agent Memory Systems Track Evolving State?</strong></a> (arXiv:2608.19652) makes the argument explicitly: existing memory benchmarks are recall-shaped, but a useful memory system has to track the <em>evolving state</em> of the world, so that answers reflect current facts rather than superseded ones. The paper introduces StateMemBench, 234 multi-session scenarios whose grading distinguishes an answer reflecting the current state from one reflecting a superseded state — separating state-tracking failures from ordinary retrieval errors by construction. It reports the task as hard for existing memory systems, retrieval-augmented baselines, and long-context baselines alike.</p>
+
+<p><a href="https://arxiv.org/abs/2608.25553"><strong>When Stale Constraints Go Unchecked</strong></a> (arXiv:2608.25553) studies the inherited-memory version: a constraint that was true when written and has since been withdrawn by a newer authoritative record. Under a fixed two-record verification budget, agents inspected the constraint's provenance path in roughly one episode in five, and when the constraint had been superseded, native budget allocation produced stale-consistent decisions around 75% of the time. The instructive part is that the failure was largely fixable within the <em>same</em> budget by re-assigning one slot to the provenance path — this is an allocation problem, not a capacity problem.</p>
+
+<p><a href="https://arxiv.org/abs/2608.19564"><strong>Remember, Verify, or Ask?</strong></a> (arXiv:2608.19564) formalises the decision boundary the consolidation tools above quietly skip: should interaction-derived information be persisted, used only in the current context, re-verified, or clarified with the user? Across model families it finds a consistent asymmetry — models verify changing facts far more reliably than they ask the user to resolve genuine ambiguity.</p>
+
+<h3>3. Persistent memory is an attack surface</h3>
+
+<p>Once memory is durable and retrieved automatically, a single poisoned write becomes a persistent behavioural change. This is the security consequence of everything else in this post, and the results are not comfortable.</p>
+
+<p><a href="https://arxiv.org/abs/2608.21230"><strong>Utility Under Attack</strong></a> (arXiv:2608.21230) uses plainly worded false assertions — no prompt-injection tricks, no trigger words, no retriever optimisation. Poisoning 1.2% of a LongMemEval corpus dropped accuracy from 0.850 to 0.300. More pointedly: a four-stage write-time screening pipeline that achieved 0.832 recall against indirect prompt injection rejected <em>zero</em> of 360 poisoned memories. The conclusion is a real boundary on content-only screening — telling a false assertion from a true one generally requires grounding outside the text itself. Provenance-weighted retrieval at its shipped weight was statistically indistinguishable from no defence at all.</p>
+
+<p><a href="https://arxiv.org/abs/2608.23471"><strong>InjecMEM</strong></a> (arXiv:2608.23471) shows the offensive side needs very little: a single ordinary interaction, with no read or edit access to the memory store, is enough to plant a record that steers later responses on a chosen topic. The construction pairs a retriever-agnostic "anchor" carrying high-recall topical cues, so retrieval reliably surfaces the record, with a short adversarial command that survives being fused into unpredictable context positions.</p>
+
+<p>The practical reading for anyone building on the architecture above: an agent's own consolidation tools are a write path from untrusted conversation directly into durable state. Namespacing gives you isolation between users; it gives you nothing against a user poisoning their own memory, or against content the agent ingested from a tool call.</p>
+
+<h3>4. Compaction destroys exactly the wrong things</h3>
+
+<p><a href="https://arxiv.org/abs/2608.22752"><strong>The Compaction Cliff in Long-Running AI Agent Memory</strong></a> (arXiv:2608.22752) is the sharpest result here, and it concerns the procedural tier. A safety rule and an episodic log compete for the same context tokens — but when the budget overflows, both get summarised at the same rate, and only the rule needs exact wording to stay enforceable. Measuring across 20 production agent configurations, the paper reports Claude Code's <code>/compact</code> on Sonnet 4.6 preserving 53% of safety rules after a single compaction round, and 10% after five.</p>
+
+<p>Their fix, Knowledge Triage, is the same instinct as the four-tier split this post argues for, applied one level down: classify each line of the knowledge base by type and give each type its own retention policy, with operators that rewrite in place under per-type fidelity, partition topics too large to compact safely (replicating in-scope safety rules across partitions), and page items back in from external storage.</p>
+
+<h3>5. Retrieval is growing structure and state</h3>
+
+<p>Flat vector search over a growing pile is being replaced by stores that know something about their own contents.</p>
+
+<ul>
+<li><a href="https://arxiv.org/abs/2608.20631"><strong>Weighted Memory Tree</strong></a> (arXiv:2608.20631) organises execution into tasks, subtasks, and actions, and gives every memory a dynamic retention score updated by events and selection-based decay — so completed trajectories fold away and low-utility content is suppressed without being lost.</li>
+<li><a href="https://arxiv.org/abs/2608.22767"><strong>EARM</strong></a> (arXiv:2608.22767) points out that agents accumulate memories but their retrievers never accumulate retrieval <em>experience</em>. It stores past LLM relevance scores in a sparse online matrix and completes it causally, so expensive reranker judgements are amortised across queries instead of discarded after each one.</li>
+<li><a href="https://arxiv.org/abs/2608.22310"><strong>HERO</strong></a> (arXiv:2608.22310) targets the two costs of the compress-and-rewrite approach — information loss from compression and semantic drift from rewriting — by converting dialogue history into a traceable heterogeneous memory graph that keeps the raw text as evidence.</li>
+<li><a href="https://arxiv.org/abs/2608.25577"><strong>PolyMemDB</strong></a> (arXiv:2608.25577) rejects the single-store paradigm outright, running graph, vector, probabilistic, and spatio-temporal storage side by side with a probabilistic inference engine that uses temporal decay and provenance to resolve long-term factual conflicts.</li>
+</ul>
+
+<h3>6. The benchmarks are getting harder — and less flattering</h3>
+
+<p><a href="https://arxiv.org/abs/2608.20664"><strong>DreamBench-SWE</strong></a> (arXiv:2608.20664) tests multi-session memory hygiene for software agents, where later tasks depend on non-inferable evidence from earlier sessions and are graded by executable hidden oracles. Its headline comparison is a useful splash of cold water: no external memory passed 21/180 units, while deterministic verbatim event memory reached 82/180. Sophisticated memory systems did not clearly beat simply keeping an accurate log.</p>
+
+<p>That result deserves to sit next to the rest. Before reaching for graph stores and learned retention policies, it is worth checking whether faithfully recording what happened — and not summarising it into vagueness — gets you most of the way there.</p>
+
+<h3>What this changes about the reference architecture</h3>
+
+<p>Nothing in the implementation above is invalidated by this work; the four-tier split holds up, and the checkpointer/store distinction is if anything more important. But three additions look increasingly non-optional for production:</p>
+
+<ul>
+<li><strong>Provenance on every record</strong> — a timestamp, a source, and a supersession pointer, so "is this still true?" is answerable without re-deriving it. Nearly every staleness paper here converges on this.</li>
+<li><strong>A write policy, not just a write tool</strong> — triage at admission time rather than trusting whatever the agent decides to persist.</li>
+<li><strong>Type-aware compaction</strong> — procedural rules must not be summarised on the same schedule, or at the same fidelity, as episodic logs.</li>
+</ul>
+
+<h2>Current research areas</h2>
+
+<p>A note on method, because it turned out to matter. The section above came from a recency-ranked sweep of the arXiv API. Running the same subject through alphaXiv's community-ranked search returned a substantially different set — and the papers it surfaced that the first sweep missed are, on the whole, the more important ones. Sorting by "newest" buries a survey from two months ago under a hundred preprints from last week. Both rankings are worth running.</p>
+
+<h3>Start here: the systematic survey</h3>
+
+<p><a href="https://arxiv.org/abs/2606.24775"><strong>Are We Ready For An Agent-Native Memory System?</strong></a> (arXiv:2606.24775) is the single most useful thing to read on this topic, and it is the paper that most directly stress-tests the architecture in this post. It evaluates 12 representative memory systems plus two baselines across five workloads spanning 11 datasets, and — critically — it decomposes each system into four modules rather than treating it as a black box: representation and storage, extraction, retrieval and routing, and maintenance.</p>
+
+<p>It also draws a clean boundary that is often blurred: agent memory is not RAG and not context engineering. RAG is stateless and read-only over a static corpus; context engineering curates the window for one turn; agent memory is a persistent, updatable substrate managing agent-specific state over time. It further argues these workloads are unlike traditional OLTP/OLAP — access is semantic rather than predicate-based, and contents evolve under conflicting observations.</p>
+
+<p>Of its nine findings, four bear directly on decisions in this post:</p>
+
+<ul>
+<li><strong>No architecture dominates.</strong> Effectiveness depends on whether the memory structure matches the workload's actual bottleneck. Relation- and time-aware retrieval wins on dispersed cross-session reasoning; summary-first routing wins on long coherent dialogue; preserving raw interaction traces wins for stateful execution.</li>
+<li><strong>Preserving evidence beats abstraction.</strong> High-retention forms best support exact recall; hierarchy improves <em>access</em> but "cannot restore content removed during representation." Compression is a one-way door.</li>
+<li><strong>Filter late, not early.</strong> Extraction should preserve context at write time; aggressive filtering discards cues that turn out to matter later.</li>
+<li><strong>Cost is governed by the scope of maintenance operations,</strong> not by whether you have structure. Localized updates give the best cost-utility balance; rich organization pays off only if upkeep avoids broad recomputation.</li>
+</ul>
+
+<h3>Which substrate, under which regime</h3>
+
+<p><a href="https://arxiv.org/abs/2608.15008"><strong>Harness the Memory</strong></a> (arXiv:2608.15008) holds everything constant except the memory substrate — 11 methods across seven substrate families, three backbones, four benchmarks, 26 instrumented metrics — and finds the ranking <em>reverses</em> between regimes. Structural graphs and hierarchical memories lead on user-centric QA; refinement memories that distill trajectories into reusable strategies lead on agentic planning, where graphs are Pareto-dominated.</p>
+
+<p>Its sharpest result concerns retrieval breadth. Increasing <em>k</em> helps factual QA and <em>hurts</em> agentic tasks — attention probing shows why: as <em>k</em> grows, attention mass shifts from the current observation and action list toward the retrieved block. For QA the answer lives in that block, so the shift helps. For an agent mid-task it is dilution, and success drops while steps-to-goal rises. Their design rule is worth adopting verbatim: <em>trade read breadth for write depth</em>.</p>
+
+<h3>Parametric memory: the axis this post left out</h3>
+
+<p>Everything in the reference implementation is non-parametric — memory lives in a store, not in weights. Three papers argue that is only half the design space.</p>
+
+<p><a href="https://arxiv.org/abs/2607.27919"><strong>Memory Decoder at Scale</strong></a> (arXiv:2607.27919) pretrains a dedicated memory module that emulates a kNN retriever's output distribution, scaled to 6.9B parameters over 300B tokens. The headline is a parameter-efficiency result: a Pythia-410M backbone with a 6.9B memory scored 37.34 against a full Pythia-12B's 37.24 — matching it with 39% fewer total parameters. Domain memories of 1.7B beat continued pretraining, LoRA, and RAG by at least 4 points, and transfer across model families with different vocabularies at 20% of the usual training budget. Memory and reasoning, it turns out, do not have to share a parameter set.</p>
+
+<p><a href="https://arxiv.org/abs/2607.26017"><strong>UniMem</strong></a> (arXiv:2607.26017) bridges the two worlds: novel queries go to an episodic buffer served by retrieval, and only once a recurring pattern accumulates enough evidence is it consolidated into a dedicated parametric block. Over 16,000 streaming samples covering 100 novel tasks it created 76 parametric units — merging similar tasks and leaving 10 sparse ones in the buffer rather than allocating parameters prematurely. This is the episodic→semantic consolidation arrow from the diagram, implemented as an actual weight update.</p>
+
+<p><a href="https://arxiv.org/abs/2608.11701"><strong>Consolidator</strong></a> (arXiv:2608.11701) is a mechanism-level proof of concept with one finding worth carrying forward conceptually. Training only 12.35K parameters — 0.041% of the model, everything else frozen — it tests whether consolidated long-term memory is merely retrievable content or also an <em>access state</em> that shapes which memory slots later inputs reach. Feeding retained memory into the router lifted updated-mapping recall from 44.4% to 87.0%, while immediate short-term recall stayed identical at 89.9%. Memory that only answers queries is doing half the job; memory that also steers retrieval is doing the other half.</p>
+
+<h3>Consolidation granularity and the cost of forgetting</h3>
+
+<p><a href="https://arxiv.org/abs/2608.12990"><strong>LycheeMemory V2</strong></a> (arXiv:2608.12990) attacks the write-side cost of eager consolidation — invoking an LLM after every turn. It batches exchanges into semantically coherent segments using embedding-based boundary detection, then consolidates once per segment. On LoCoMo that cut construction tokens by 86% versus A-Mem while <em>raising</em> accuracy to 89.22%, and query tokens fell too. The ablation is the interesting part: reverting to turn-level consolidation cost 7.3 points of accuracy and raised construction tokens 316%, and replacing semantic boundaries with fixed windows cost 6.8 points. Batching buys the cost saving; semantic boundaries buy the accuracy.</p>
+
+<p><a href="https://arxiv.org/abs/2607.08032"><strong>What to Keep, What to Forget</strong></a> (arXiv:2607.08032) unifies KV-cache compression, prompt compression, architectural state compression, and agent memory consolidation as a single rate–distortion problem, with a Fano-style lower bound saying that below a task's inherent information requirement, errors are unavoidable at any layer. Its empirical result is the one to remember: comparing a reversible operator (archive and retrieve) against an irreversible one (LLM summarization) over repeated compaction events, the reversible operator held recall near 0.95 while the irreversible one sat at 0.33–0.56 and degraded further with each round. Their first design principle follows directly — never irreversibly discard what cannot be cheaply re-derived.</p>
+
+<h3>Retrieval as recollection</h3>
+
+<p><a href="https://arxiv.org/abs/2608.13334"><strong>RippleMem</strong></a> (arXiv:2608.13334) reframes the access problem: the bottleneck is not storage but recovering a full evidence set when the relevant pieces are scattered across many interactions. Flat retrieval returns isolated, incomplete records. RippleMem recalls anchors through hybrid cues, then expands outward along semantic and structural associations — initially recalled memories act as cues for completing the rest. It reports +3.95% on LoCoMo and up to +11.87% on LongMemEval-S while cutting graph construction cost roughly 30×.</p>
+
+<p><a href="https://arxiv.org/abs/2608.04746"><strong>Caching for the Future</strong></a> (arXiv:2608.04746) takes its principle from western scrub jays, which recover perishable worms when caches are fresh and durable peanuts when they are not. The observation driving it is precise: a user's profession stays valid for years, their meeting room is stale by afternoon, their current branch may not survive lunch — and uniform age-based discounting fails because memory types decay at fundamentally different rates. ScrubJay-MEM binds each memory as a What–Where–When tuple with an estimated perishability coefficient and utility horizon. Notably, the authors scope their own claim: gains narrow under stronger backbones and reverse on fact-consolidation tasks.</p>
+
+<h3>Security, revisited: repair and authority</h3>
+
+<p>The section above covered attacks and failed defences. Two papers cover what comes after.</p>
+
+<p><a href="https://arxiv.org/abs/2607.27080"><strong>MemSecBench</strong></a> (arXiv:2607.27080) traces the same malicious content through a full Write–Execute–Forget lifecycle across 310 cases and 24 agent configurations. Malicious content persisted in 84.2% of cases, the full write-then-exploit chain succeeded in 50.3%, and selective repair succeeded in only 56.1%. Two bottlenecks emerge. On the attack side it is <em>adoption</em> — recall stayed high at 76.1% but adoption dropped to 53.7%, making the moment an agent acts on recalled memory the best place to intervene. On the repair side the bottleneck is not removing the bad record (86.3% succeeded) but doing so without destroying good ones (62.5%). No backend was uniformly safer, and resistance and recoverability turned out to be independent properties: one swap cut attack success barely at all while lifting repair from 46.3% to 87.6%.</p>
+
+<p><a href="https://arxiv.org/abs/2608.01679"><strong>When Memory Becomes Authority</strong></a> (arXiv:2608.01679) identifies a failure this post's <code>update_user_profile_fact</code> tool is squarely vulnerable to. Consolidation preserves the <em>content</em> of a claim while erasing the source constraints governing its use — "the user lives in Seattle" survives, but whether the user said it or a third party merely reported it does not. The authors call the resulting false upgrade <em>authority laundering</em>, and found it in 48 of 49 consolidator-backend configurations.</p>
+
+<p>The consequences are measurable. With source-erased memory, agents performed prohibited actions 50.3% of the time and permitted ones 49.4% — statistically indistinguishable, meaning authority was simply not a factor in the decision. Natural-language provenance in the memory text helped only modestly (down to 40.5%). Structured authority metadata cut it to 5.8%, and an end-to-end pipeline with automatically predicted labels took unauthorized actions from 16.9% to 0.0% with no loss of legitimate task success. The lesson is specific: provenance has to be a typed field the agent can condition on, not a sentence in the memory body.</p>
+
+<h3>The short version</h3>
+
+<p>If you read three of these, make it the agent-native memory survey for the empirical grounding, the rate–distortion paper for the reversibility principle, and the authority-collapse paper for the security model. Taken together with the section above, they point at a consistent conclusion: the hard parts of agent memory are not retrieval quality. They are deciding what to write, keeping what you wrote honest about where it came from and whether it is still true, and never destroying anything you cannot rebuild.</p>
+
+<h2>Closing thought</h2>
+
+<p>The temptation with agent memory is to treat it as one problem and solve it with one tool — usually a vector database that everything gets dumped into. The four-tier split exists because these are genuinely four different problems with four different access patterns: state you checkpoint, experience you search by similarity, facts you fetch by key, and rules you version-control.</p>
+
+<p>Get the split right and the retrieval logic becomes almost boring — a <code>get</code> here, a <code>search</code> there, assembled into a prompt. Get it wrong and no amount of embedding tuning will save you, because you will be running similarity search over things you should simply have looked up.</p>
