@@ -1,0 +1,174 @@
+<!doctype html><meta charset="utf-8">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:#04091c}
+body{width:1560px;font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased}
+.wrap{padding:22px;background:
+  radial-gradient(1000px 500px at 15% -10%, rgba(56,132,255,.28), transparent 60%),
+  radial-gradient(850px 600px at 105% 110%, rgba(150,80,255,.22), transparent 60%),
+  linear-gradient(160deg,#061024 0%,#081633 45%,#050d22 100%);}
+.panel{border:2px solid rgba(90,160,255,.55);border-radius:16px;padding:26px 20px 20px;
+  background:linear-gradient(180deg,rgba(10,26,58,.92),rgba(6,16,38,.92));
+  box-shadow:0 0 0 1px rgba(120,190,255,.14) inset, 0 0 60px rgba(40,110,220,.28);}
+h1{color:#fff;font-size:40px;text-align:center;margin-bottom:8px;font-weight:800;letter-spacing:.2px}
+.sub{color:#95baec;font-size:19px;text-align:center;margin-bottom:24px;font-weight:500}
+table{border-collapse:separate;border-spacing:10px;width:100%;table-layout:fixed}
+td.rowhead{width:196px}
+.vend{border-radius:12px;padding:14px 8px;text-align:center;color:#fff;font-size:32px;font-weight:800}
+.vend span{display:block;font-size:16px;font-weight:600;opacity:.86;margin-top:3px}
+.v1{background:linear-gradient(180deg,#123a6b,#0d2a50);border:2px solid #4aa3ff;box-shadow:0 0 22px rgba(74,163,255,.45)}
+.v2{background:linear-gradient(180deg,#12492f,#0c3322);border:2px solid #46d585;box-shadow:0 0 22px rgba(70,213,133,.42)}
+.v3{background:linear-gradient(180deg,#3b1c6b,#281148);border:2px solid #b06cff;box-shadow:0 0 22px rgba(176,108,255,.45)}
+.v4{background:linear-gradient(180deg,#6b1626,#4a0f1b);border:2px solid #ff5a6e;box-shadow:0 0 22px rgba(255,90,110,.42)}
+td.rowhead{background:#0c1c3e;border:1px solid rgba(90,160,255,.35);border-radius:12px;color:#fff;
+  font-size:21px;font-weight:800;text-transform:uppercase;letter-spacing:.4px;text-align:center;padding:16px 8px;line-height:1.2}
+td.rowhead em{display:block;font-style:normal;font-size:15px;font-weight:600;color:#93b8ea;text-transform:none;letter-spacing:0;margin-top:8px;line-height:1.35}
+td.cell{border-radius:12px;padding:15px 15px;vertical-align:top;font-size:19px;line-height:1.42;color:#131f38}
+.c1{background:#e9f2ff;border:2px solid #7cb8ff}
+.c2{background:#e9f8ee;border:2px solid #6fd79c}
+.c3{background:#f2eaff;border:2px solid #bd8cff}
+.c4{background:#ffecef;border:2px solid #ff8b9c}
+.cell b{display:block;font-size:21px;margin-bottom:10px;color:#0b1730;line-height:1.2}
+.cell ul{list-style:none}
+.cell li{position:relative;padding-left:16px;margin-bottom:9px}
+.cell li:last-child{margin-bottom:0}
+.cell li:before{content:"";position:absolute;left:0;top:10px;width:6px;height:6px;border-radius:50%;background:#5d7597}
+code{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:17px;background:rgba(10,30,70,.10);
+  border:1px solid rgba(10,30,70,.14);border-radius:4px;padding:0 4px}
+.num{font-variant-numeric:tabular-nums;font-weight:700}
+.foot{color:#88ace0;font-size:16px;margin-top:18px;text-align:center;line-height:1.5}
+</style>
+<div class="wrap"><div class="panel">
+<h1>Leading Vector Databases for RAG Pipelines</h1>
+<div class="sub">Indexing, retrieval, scaling and measured performance</div>
+<table>
+<tr>
+  <td class="rowhead" style="background:transparent;border:0"></td>
+  <td class="vend v1">Chroma<span>embedded</span></td>
+  <td class="vend v2">pgvector<span>Postgres extension</span></td>
+  <td class="vend v3">Qdrant<span>purpose-built engine</span></td>
+  <td class="vend v4">Pinecone<span>managed serverless</span></td>
+</tr>
+
+<tr>
+<td class="rowhead">Core function<em>What it fundamentally is</em></td>
+<td class="cell c1"><b>Embedded, in-process</b><ul>
+<li>Runs inside your app</li>
+<li>SQLite + hnswlib in RAM</li>
+<li>Cloud is a different engine</li></ul></td>
+<td class="cell c2"><b>An extension, not a DB</b><ul>
+<li><code>CREATE EXTENSION vector</code></li>
+<li>Vectors are a column type</li>
+<li>Free joins and backups</li></ul></td>
+<td class="cell c3"><b>Purpose-built engine</b><ul>
+<li>Rust; self-host or cloud</li>
+<li>Payload is first-class</li>
+<li>Tunable segments</li></ul></td>
+<td class="cell c4"><b>Managed serverless</b><ul>
+<li>Nothing to size or shard</li>
+<li>Storage/compute separated</li>
+<li>You buy an SLA, not a box</li></ul></td>
+</tr>
+
+<tr>
+<td class="rowhead">Indexing<em>The ANN structure, and what you can tune</em></td>
+<td class="cell c1"><b>HNSW, few knobs</b><ul>
+<li><code>M</code> 16, <code>ef_search</code> 100</li>
+<li>Index must fit in RAM</li>
+<li>Cloud SPANN: not tunable</li></ul></td>
+<td class="cell c2"><b>HNSW, IVFFlat, DiskANN</b><ul>
+<li><code>m</code> 16, <code>ef_construction</code> 64</li>
+<li>IVFFlat needs training data</li>
+<li>pgvectorscale adds DiskANN</li></ul></td>
+<td class="cell c3"><b>Filterable HNSW</b><ul>
+<li><code>m</code>, <code>ef_construct</code></li>
+<li>Payload-aware graph edges</li>
+<li>ACORN for hard filters</li></ul></td>
+<td class="cell c4"><b>Proprietary, no knobs</b><ul>
+<li>Immutable slabs on S3</li>
+<li>Index adapts to slab size</li>
+<li>Nothing to tune or break</li></ul></td>
+</tr>
+
+<tr>
+<td class="rowhead">Filtering<em>Predicates and hybrid search</em></td>
+<td class="cell c1"><b>Basic metadata filters</b><ul>
+<li><code>where</code> clauses only</li>
+<li>Post-filter semantics</li>
+<li>Hybrid support is limited</li></ul></td>
+<td class="cell c2"><b>SQL is the filter</b><ul>
+<li>Predicates run after the scan</li>
+<li>Iterative scans refill results</li>
+<li>You write the fusion</li></ul></td>
+<td class="cell c3"><b>Best filtered search</b><ul>
+<li>No pre/post-filter tradeoff</li>
+<li>Native sparse vectors (v1.7)</li>
+<li>RRF fusion built in</li></ul></td>
+<td class="cell c4"><b>Managed hybrid</b><ul>
+<li><code>$in</code>/<code>$nin</code> up to 10,000</li>
+<li>Sparse–dense supported</li>
+<li>40&nbsp;KB metadata per record</li></ul></td>
+</tr>
+
+<tr>
+<td class="rowhead">Performance<em>Timescale benchmark, 50M × 768-d</em></td>
+<td class="cell c1"><b>Not in this class</b><ul>
+<li>4–8&nbsp;ms while small</li>
+<li>Scales, then collapses</li>
+<li>No credible 50M figures</li></ul></td>
+<td class="cell c2"><b>Throughput winner</b><ul>
+<li>99%: <span class="num">472</span> QPS,<br>p99 <span class="num">74.6</span>&nbsp;ms</li>
+<li>90%: <span class="num">1,590</span> QPS,<br>p99 <span class="num">15.7</span>&nbsp;ms</li>
+<li>11.4&times; Qdrant's throughput</li></ul></td>
+<td class="cell c3"><b>Tail-latency winner</b><ul>
+<li>99%: <span class="num">41</span> QPS,<br>p99 <span class="num">38.7</span>&nbsp;ms</li>
+<li>90%: <span class="num">361</span> QPS,<br>p99 <span class="num">5.8</span>&nbsp;ms</li>
+<li>Half pgvector's p99</li></ul></td>
+<td class="cell c4"><b>Vendor-reported gap</b><ul>
+<li>s1: 28&times; higher p95</li>
+<li>p2 never hit 99% recall</li>
+<li>Publisher builds pgvector</li></ul></td>
+</tr>
+
+<tr>
+<td class="rowhead">Scaling<em>Where the ceiling is</em></td>
+<td class="cell c1"><b>Single node, RAM-bound</b><ul>
+<li>&asymp;&nbsp;<span class="num">0.245</span>M records per GB</li>
+<li>64&nbsp;GB &rarr; 15M records</li>
+<li>Past RAM it swaps</li></ul></td>
+<td class="cell c2"><b>Scales like Postgres</b><ul>
+<li>Vertical + read replicas</li>
+<li>DiskANN streams from disk</li>
+<li>50M build: <span class="num">~11.1</span>&nbsp;h</li></ul></td>
+<td class="cell c3"><b>Horizontal by design</b><ul>
+<li>Sharding and disk tiers</li>
+<li>4&times; scalar, 32&times; binary</li>
+<li>50M build: <span class="num">~3.3</span>&nbsp;h</li></ul></td>
+<td class="cell c4"><b>Elastic, with a catch</b><ul>
+<li>Object storage: unbounded</li>
+<li>Cold slabs cost a fetch</li>
+<li>100&nbsp;RPS per namespace</li></ul></td>
+</tr>
+
+<tr>
+<td class="rowhead">Cost &amp; fit<em>What you pay, and who picks it</em></td>
+<td class="cell c1"><b>Free until it isn't</b><ul>
+<li>No infra line item</li>
+<li>Prototypes, &lt;10M records</li>
+<li>Wrong as a default</li></ul></td>
+<td class="cell c2"><b>Reuses what you run</b><ul>
+<li>~$835/mo benchmark box</li>
+<li>No second store to sync</li>
+<li>You own HA and rebuilds</li></ul></td>
+<td class="cell c3"><b>Pay in ops</b><ul>
+<li>Self-host or managed cloud</li>
+<li>Right when filters are strict</li>
+<li>A second system to run</li></ul></td>
+<td class="cell c4"><b>Pay in dollars</b><ul>
+<li>$3,241–3,889 vs $835</li>
+<li>75–79% more</li>
+<li>Worth it if ops costs more</li></ul></td>
+</tr>
+</table>
+<div class="foot">Performance figures: Timescale/TigerData pgvector-vs-Qdrant benchmark — 50M × 768-d Cohere embeddings, AWS r6id.4xlarge, binary quantization with rescoring, filtered search excluded.</div>
+</div></div>
