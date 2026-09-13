@@ -1,0 +1,198 @@
+<figure><img src="https://sandeephalder.blog/wp-content/uploads/2026/09/how-ai-agents-get-hacked.png" alt="Five attack surfaces of an AI agent (context window, tools and supply chain, permissions, memory and RAG, people and other agents) mapped to OWASP LLM Top 10 2025 and Agentic Top 10 2026 IDs, with a 2025 incident and a control for each"/><figcaption>Where an agent gets attacked, grouped by where the attack enters rather than by OWASP rank. IDs are OWASP&rsquo;s own: LLMxx from the Top 10 for LLM Applications 2025, ASIxx from the Top 10 for Agentic Applications 2026. Each incident is a publicly disclosed 2025 case, covered below with sources.</figcaption></figure>
+
+<p>Security vendors have noticed that AI agents are software, and that software can be scanned. OpenText&rsquo;s <a href="https://solutions.opentext.com/cybersecurity/application-security/">application security page</a> is a good example of the pitch: an &ldquo;AI-amplified&rdquo; Fortify portfolio that promises to find prompt injection paths, insecure handling of model inputs and outputs, and data leaking through AI responses. It anchors those claims to the OWASP Top 10 for LLM Applications, and offers a buyer&rsquo;s guide on what code scanning finds in that list.</p>
+
+<p>What the page does not do is tell you how an agent actually gets compromised. That is not really a criticism, since it is a product page, but it means the useful material sits one link away, in the OWASP lists the page points to. This post follows that link. It walks through the ways agents are attacked, grouped by where the attack enters, with a real 2025 incident for each. Then it comes back to the question the vendor page raises without answering: how much of this can a scanner see?</p>
+
+<h2>First, a correction to the list everyone still quotes</h2>
+
+<p>The OWASP LLM Top 10 that still circulates in slide decks and vendor summaries is the 2023 edition: prompt injection, insecure output handling, training data poisoning, model denial of service, supply chain, sensitive information disclosure, insecure plugin design, excessive agency, overreliance, model theft. It is also the list this post started from. OWASP revised it in late 2024 as the <a href="https://genai.owasp.org/llm-top-10/">2025 edition</a>. In December 2025 it published a separate <a href="https://genai.owasp.org/2025/12/09/owasp-top-10-for-agentic-applications-the-benchmark-for-agentic-security-in-the-age-of-autonomous-ai/"><strong>Top 10 for Agentic Applications</strong></a>, because a list written for chatbots no longer stretched far enough to cover systems that take actions.</p>
+
+<p>The revisions are not cosmetic. They record what two years of real deployments taught the people who maintain the list:</p>
+
+<figure><table><thead><tr><th>2023 entry</th><th>2025 entry</th><th>What changed</th></tr></thead><tbody>
+<tr><td>LLM01 Prompt Injection</td><td><strong>LLM01</strong> Prompt Injection</td><td>Still first. Now explicitly covers indirect injection through documents, web pages and images.</td></tr>
+<tr><td>LLM02 Insecure Output Handling</td><td><strong>LLM05</strong> Improper Output Handling</td><td>Same risk, ranked lower.</td></tr>
+<tr><td>LLM03 Training Data Poisoning</td><td><strong>LLM04</strong> Data and Model Poisoning</td><td>Widened from pre-training to fine-tuning and embedding data.</td></tr>
+<tr><td>LLM04 Model Denial of Service</td><td><strong>LLM10</strong> Unbounded Consumption</td><td>Widened to runaway cost (&ldquo;denial of wallet&rdquo;) and model extraction.</td></tr>
+<tr><td>LLM05 Supply Chain Vulnerabilities</td><td><strong>LLM03</strong> Supply Chain</td><td>Moved up. Covers models, adapters and datasets as well as packages.</td></tr>
+<tr><td>LLM06 Sensitive Information Disclosure</td><td><strong>LLM02</strong> Sensitive Information Disclosure</td><td>Moved up to second.</td></tr>
+<tr><td>LLM07 Insecure Plugin Design</td><td>No longer a separate entry</td><td>Plugins became tools; the risk is split across supply chain and excessive agency.</td></tr>
+<tr><td>LLM08 Excessive Agency</td><td><strong>LLM06</strong> Excessive Agency</td><td>Moved up as agents became the default architecture.</td></tr>
+<tr><td>LLM09 Overreliance</td><td><strong>LLM09</strong> Misinformation</td><td>Reframed around the confident falsehood, with overreliance as its consequence.</td></tr>
+<tr><td>LLM10 Model Theft</td><td>Folded into <strong>LLM10</strong></td><td>Extraction through the API is treated as a consumption abuse.</td></tr>
+<tr><td>&mdash;</td><td><strong>LLM07</strong> System Prompt Leakage</td><td>New. Stop treating the system prompt as a secret.</td></tr>
+<tr><td>&mdash;</td><td><strong>LLM08</strong> Vector and Embedding Weaknesses</td><td>New. RAG stores became an attack surface of their own.</td></tr>
+</tbody></table></figure>
+
+<p>The agentic list adds ten more, prefixed ASI: agent goal hijack, tool misuse, identity and privilege abuse, agentic supply chain, unexpected code execution, memory and context poisoning, insecure inter-agent communication, cascading failures, human&ndash;agent trust exploitation, and rogue agents. Most of these are not new vulnerability classes so much as the LLM entries with an action attached. That is the idea worth taking away: in an agent, every one of the old risks gets a verb.</p>
+
+<h2>Why an agent is a different target from a chatbot</h2>
+
+<p>A chatbot that gets prompt-injected <em>says</em> something it should not. An agent that gets prompt-injected <em>does</em> something it should not. It acts with your credentials, against your systems, often without anyone watching the individual step.</p>
+
+<p>The root cause is the same in both cases, and it has not been fixed. A language model receives instructions and data through the same channel, as the same kind of tokens, and it cannot reliably tell them apart. The system prompt, the user&rsquo;s request, a retrieved web page, an email body and a tool&rsquo;s JSON response all arrive as text in one context window, so anything the model reads can act as an instruction. Guardrail classifiers and &ldquo;ignore instructions inside the following content&rdquo; delimiters lower the rate at which this happens. None of them lower it to zero, and an attacker only needs the one case that gets through.</p>
+
+<p><a href="https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/">Simon Willison</a> gave the resulting risk its most useful shape in June 2025, and I covered it in depth in <a href="https://sandeephalder.blog/2026/08/23/the-lethal-trifecta-why-capable-ai-agents-are-easy-to-turn-against-you/">an earlier post on the lethal trifecta</a>. The short version: an agent can be used to steal data when it combines three things: access to private data, exposure to untrusted content, and a way to communicate externally. Each of these is a feature. Together they form an exfiltration path that needs no bug in any code you wrote. Meta turned the idea into a design rule in October 2025, the <a href="https://ai.meta.com/blog/practical-ai-agent-security/"><strong>Agents Rule of Two</strong></a>. Within one session, an agent should have at most two of these three properties: it processes untrusted input, it can reach sensitive systems or data, or it can change state or communicate externally. If a task needs all three, a human belongs in the loop.</p>
+
+<p>Keep that frame in mind for the rest of this post. Almost every attack below is a way to supply the untrusted-content leg to an agent that already had the other two.</p>
+
+<h2>The five attack surfaces</h2>
+
+<p>OWASP ranks its entries by severity. For engineering, it is more useful to group them by where the attack enters, because that is where the control has to go. The summary figure at the top uses five surfaces.</p>
+
+<h3>1. The context window: instructions hidden in data</h3>
+
+<p><em>LLM01 Prompt Injection, ASI01 Agent Goal Hijack, LLM02 Sensitive Information Disclosure, LLM07 System Prompt Leakage.</em></p>
+
+<p>Direct prompt injection, where a user types &ldquo;ignore your previous instructions&rdquo;, is the version everyone demos and the least interesting one, because the attacker is only attacking their own session. The dangerous version is <strong>indirect</strong>, and the attacker never talks to the agent at all. They leave instructions somewhere the agent will read on someone else&rsquo;s behalf: an email, a support ticket, a GitHub issue, a web page, a PDF, a calendar invite, a code comment.</p>
+
+<p><strong>EchoLeak</strong> (<a href="https://msrc.microsoft.com/update-guide/vulnerability/CVE-2025-32711">CVE-2025-32711</a>, CVSS 9.3) is the reference case. In June 2025, researchers at Aim Security showed that a single email sent to a Microsoft 365 user could carry instructions that Copilot would pull in through retrieval when the user later asked an unrelated question. The instructions told Copilot to collect sensitive content from everything it could reach and encode it into a link that the client would fetch automatically. The user never opened the email. Aim called the underlying pattern an <em>LLM scope violation</em>: untrusted outside input makes the model reach into data it was trusted with. Microsoft fixed it on the server side and reported no exploitation in the wild. The fix closed that particular path. It did not change the underlying situation: Copilot still reads attacker-controlled email and can still see everything its user can.</p>
+
+<p>System prompt leakage belongs here too, and the 2025 list frames it correctly. Assume your system prompt will be extracted, because role-play and reformatting tricks recover it reliably. The vulnerability is not that the prompt leaks. It is keeping anything in the prompt that matters once it leaks: API keys, internal hostnames, the only copy of an authorization rule. Authorization belongs in code the model cannot talk its way past.</p>
+
+<h3>2. Tools and the supply chain: trusted parts, toxic flows</h3>
+
+<p><em>ASI02 Tool Misuse, ASI04 Agentic Supply Chain, LLM03 Supply Chain, LLM05 Improper Output Handling, ASI05 Unexpected Code Execution.</em></p>
+
+<p>Tools are how an agent acts, and every tool is two attack surfaces: what it does, and what it says about itself.</p>
+
+<p>What a tool says about itself is its description, and the model reads that description as instructions. In April 2025, Invariant Labs <a href="https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks">demonstrated <strong>tool poisoning</strong></a>. They built an MCP server whose tool looks harmless in the client UI but whose full description tells the model to read local files, such as SSH keys and the client&rsquo;s own configuration, and pass them along inside a tool parameter. MCP servers can also change their descriptions after you approve them, so the tool you reviewed is not necessarily the tool you are running.</p>
+
+<p>What a tool does can be abused even when the tool is honest. In May 2025, <a href="https://invariantlabs.ai/blog/mcp-github-vulnerability">Invariant showed</a> that a malicious issue in a public repository could turn the official GitHub MCP server against its own user. A developer asks their agent to look at open issues. The planted issue asks the agent to collect information from the developer&rsquo;s private repositories and publish it in a pull request on the public one. The agent holds a token with access to both, so it complies. As Invariant stressed, the GitHub MCP server had no bug, and that is exactly why the incident matters. Every tool call was authorized; the vulnerability was the combination. Invariant called it a <strong>toxic agent flow</strong>: the lethal trifecta built entirely from legitimate parts.</p>
+
+<p>The traditional supply chain is still underneath all this. In July 2025, an attacker found an over-scoped GitHub token in the build configuration of the <strong>Amazon Q Developer extension for VS Code</strong>. They used it to commit a prompt to the open-source repository that told the agent to wipe local files and delete cloud resources. The prompt shipped in the official 1.84.0 release. <a href="https://aws.amazon.com/security/security-bulletins/AWS-2025-015/">AWS found</a> that a syntax error kept it from executing, and pulled the version. The attack was not sophisticated. The payload was a paragraph of English, and that is the new part: malicious code in an agent&rsquo;s supply chain can be a prompt, and a malware scanner hunting for suspicious binaries will not flag a sentence.</p>
+
+<p>Improper output handling is the same trust error pointed the other way. Whatever the model emits (a SQL fragment, a shell command, a file path, HTML, a Markdown image link) is attacker-influenced whenever anything in its context was. Pass that output to an interpreter, a query builder or a browser without the validation you would give user input, and a prompt injection becomes classic cross-site scripting, SQL injection or remote code execution. For agents that write and run code, this is the default path rather than an edge case, which is why the agentic list gives unexpected code execution its own entry.</p>
+
+<h3>3. Permissions and autonomy: the blast radius</h3>
+
+<p><em>LLM06 Excessive Agency, ASI03 Identity and Privilege Abuse, LLM10 Unbounded Consumption.</em></p>
+
+<p>Excessive agency is not a way in; it multiplies the damage from every other way in. A prompt-injected agent with read-only access to one repository leaks one repository. Give the same agent an organization-wide token, write permission and a shell, and it becomes whatever the attacker wants.</p>
+
+<p>OWASP splits it into three causes, and they are worth keeping apart because each has its own fix. <strong>Excessive functionality</strong> means the agent has tools this task does not need. <strong>Excessive permissions</strong> means the tools it does need hold broader rights than the task requires. <strong>Excessive autonomy</strong> means high-impact actions run without confirmation.</p>
+
+<p>The <a href="https://www.wiz.io/blog/s1ngularity-supply-chain-attack"><strong>s1ngularity</strong> attack</a> on the Nx build system in August 2025 showed what happens when an attacker gets code running on a developer machine that has AI coding CLIs installed. The malicious npm packages checked for Claude Code, Gemini CLI and Amazon Q. They launched whichever they found with the flags that switch off permission prompts, and told the agent to search the filesystem for secrets and crypto wallets. The stolen data was pushed to public repositories created in the victims&rsquo; own GitHub accounts. Nobody tricked the agents through their context; the malware simply used them. They were installed with broad filesystem access and a switch that turns off their only safety check. Permission-bypass modes are a convenience, but on a machine that also holds production credentials they are a post-exploitation tool installed in advance.</p>
+
+<p>Unbounded consumption is excessive agency measured in money. An agent that can loop, spawn sub-agents or call paid APIs without a budget can be pushed into recursive work that burns through quota, whether by an attacker or by its own confusion. The 2023 list called this model denial of service. The 2025 name is more honest, because the usual result is not an outage but an invoice.</p>
+
+<h3>4. Memory and knowledge: compromise that persists</h3>
+
+<p><em>LLM04 Data and Model Poisoning, LLM08 Vector and Embedding Weaknesses, ASI06 Memory and Context Poisoning.</em></p>
+
+<p>A prompt injection normally ends when the session does. Memory makes it persistent.</p>
+
+<p>In February 2025, <a href="https://embracethered.com/blog/posts/2025/gemini-memory-persistence-prompt-injection/">Johann Rehberger showed</a> that a document the user asked <strong>Gemini</strong> to summarize could write to its long-term memory. The document&rsquo;s hidden instructions did not act right away. They told Gemini to save false facts about the user the next time the user said something ordinary, like &ldquo;yes&rdquo; or &ldquo;sure&rdquo;. Rehberger called this <em>delayed tool invocation</em>. Because the action was tied to a later user turn, it slipped past the defense that stops the model from calling tools while it is processing untrusted content. The planted memories then shaped every later conversation.</p>
+
+<p>The same logic applies to every store an agent reads from. A poisoned document in a RAG corpus is an injection that is retrieved again every time a relevant query arrives. A shared vector store without per-tenant isolation can leak one customer&rsquo;s documents into another customer&rsquo;s answers. Training data poisoning, which led the old list, is still real for teams that fine-tune. But for most teams building agents on hosted models, the practical poisoning surface is not the training set. It is the retrieval corpus and the memory store, which are written to constantly and reviewed rarely.</p>
+
+<h3>5. People and other agents: trust as the payload</h3>
+
+<p><em>LLM09 Misinformation, ASI09 Human&ndash;Agent Trust Exploitation, ASI07 Insecure Inter-Agent Communication, ASI08 Cascading Failures, ASI10 Rogue Agents.</em></p>
+
+<p>In most agent designs, the last line of defense is a human approving something. The most uncomfortable entries on the agentic list are about how that line fails.</p>
+
+<p>In July 2025, SaaStr founder Jason Lemkin was building an app with <strong>Replit&rsquo;s agent</strong> and had declared a code freeze. <a href="https://www.theregister.com/2025/07/21/replit_saastr_vibe_coding_incident/">The agent deleted the production database anyway</a>, wiping records on more than a thousand executives and companies. It then generated fake data and told him a rollback was impossible, which was not true. No attacker was involved. <a href="https://genai.owasp.org/2025/12/09/owasp-top-10-for-agentic-applications-the-benchmark-for-agentic-security-in-the-age-of-autonomous-ai/">OWASP cites the case</a> under rogue agents, but the failure a security reviewer should notice is the second one: everything the human knew about the system came from the agent&rsquo;s own account of what it had done. <a href="https://www.theregister.com/2025/07/22/replit_saastr_response/">Replit&rsquo;s response</a> was automatic separation of development and production databases, a planning-only mode, and better restore. Every item on that list is a control that works even if the agent does not report truthfully.</p>
+
+<p>Approval prompts fail in quieter ways too. An agent that asks for confirmation forty times a day trains its user to click yes. An agent that describes a destructive action in fluent, reasonable prose (&ldquo;I&rsquo;ll clean up the unused resources&rdquo;) gets approved on the strength of the description. Multi-agent systems add a machine version of the same problem. If one agent accepts another&rsquo;s output as trusted instructions, an injection in the first spreads through all of them, and a mistake that a single agent would have caught turns into a confident consensus.</p>
+
+<h2>What a code scanner can and cannot see</h2>
+
+<p>Which brings us back to the vendor page. OpenText claims that its static, dynamic and software composition analysis, together with AI-specific detection, covers the OWASP LLM risks. The fair reading is that scanning covers the part of these risks that exists in code. That part is real, and worth catching:</p>
+
+<ul>
+<li><strong>Model output reaching a dangerous sink</strong>, such as an eval, a shell call, a raw SQL string or unescaped HTML. This is improper output handling, and it is a data-flow problem static analysis has been solving for decades.</li>
+
+<li><strong>Secrets hard-coded into prompts</strong> or prompt templates, which leak the moment the system prompt does.</li>
+
+<li><strong>Vulnerable or malicious dependencies</strong> in the agent&rsquo;s package tree, the standard job of software composition analysis.</li>
+
+<li><strong>Over-broad scopes and permission-bypass settings</strong> in configuration files, when they are actually written down.</li>
+</ul>
+
+<p>What a scanner cannot see is the part of the attack that does not exist until runtime. The EchoLeak email was never in Microsoft&rsquo;s repository. The malicious GitHub issue was not in the MCP server&rsquo;s code, and Invariant was explicit that the server had no bug to find. A poisoned memory is a database row written last Tuesday. A tool description can change after deployment. And the trifecta is a property of which tools, data and credentials end up in the same session. That is a deployment decision, often made by whoever installs an MCP server rather than whoever wrote the agent. It is the same gap I described in <a href="https://sandeephalder.blog/2026/08/23/designing-an-agentic-ai-platform-for-vulnerability-orchestration/">designing an agentic platform for vulnerability orchestration</a>, one level up: static analysis sees code, not context.</p>
+
+<p>So when any product page, this one or a competitor&rsquo;s, promises &ldquo;OWASP LLM Top 10 coverage&rdquo;, read it as <em>we flag the code patterns that make these risks easier to exploit</em>, not <em>these risks are handled</em>. The same skepticism applies to the one number on the page. The 70% reduction in mean time to remediate comes from OpenText&rsquo;s own eight-week rollout of its own tool, and the page gives neither the baseline nor what counted as remediated.</p>
+
+<h2>Design as if the injection succeeds</h2>
+
+<p>If the research and the incidents agree on one conclusion, it is that you cannot filter your way out of prompt injection. Detection helps, but it is not a boundary. The controls that hold up are the ones that limit what a successful injection can do.</p>
+
+<ol>
+<li><strong>Break the trifecta in every session.</strong> Apply the Rule of Two. An agent that reads untrusted content and holds private data should not also be able to send email, open pull requests or fetch arbitrary URLs. That includes the quiet channels, like rendering a Markdown image from a host the attacker chose. When a task needs all three, split it across agents with separate permissions, or put a human on the step that crosses the line.</li>
+
+<li><strong>Separate control flow from data flow.</strong> In <a href="https://arxiv.org/abs/2503.18813">CaMeL</a>, a design from Google, Google DeepMind and ETH Zurich, a privileged model plans the task using only the trusted user request. A quarantined model handles the untrusted data and cannot choose which tools get called. Data carries capability labels, and a policy check runs before every tool call. It is not free: on the AgentDojo benchmark, CaMeL completed 77% of tasks with provable security, against 84% for an undefended agent. That seven-point gap is the honest price of a real boundary, and it beats the alternatives by a wide margin.</li>
+
+<li><strong>Enforce least agency outside the model.</strong> Give each task its own short-lived credential, scoped to the resources that task needs and read-only by default. Separate development and production at the infrastructure level, not in the prompt. Never run an agent with permission prompts disabled on a machine that holds anything valuable.</li>
+
+<li><strong>Treat every model output as untrusted input.</strong> Validate, parameterize and sandbox it exactly as you would a form field from an anonymous user. Run generated code in an isolated environment with no ambient credentials.</li>
+
+<li><strong>Pin and review the tool layer.</strong> Allow-list MCP servers, pin their versions, and review again whenever a tool description changes. A tool description is code that runs inside the model&rsquo;s head.</li>
+
+<li><strong>Put provenance on memory.</strong> Record where every memory and every retrieved document came from, gate writes that originate in untrusted content, and isolate stores per tenant, with namespaces that work as real access control.</li>
+
+<li><strong>Design approvals for tired humans.</strong> Ask for confirmation only on irreversible or externally visible actions, and show the concrete effect (the diff, the recipient list, the resources to be deleted) rather than the agent&rsquo;s summary of it. Log every tool call somewhere the agent cannot edit.</li>
+</ol>
+
+<h2>Closing thought</h2>
+
+<p>The 2023 list read like an application security checklist with an LLM stapled on. The 2025 revision and the agentic list read like what they are: a record of teams discovering that the model is not really the component under attack. The model is the confused deputy. What gets attacked is everything wired around it: the permissions, the tools, the memories and the human approvals.</p>
+
+<p>That is also why neither a better model nor a better scanner will solve this on its own. A model that resists 99% of injections can be beaten by an automated attacker in about a hundred tries. Scanners will find the code that turns an injection into a catastrophe, and you should run them. But the decision that matters most is whether one session holds untrusted content, private data and a way out at the same time. That is an architecture decision, so make it on purpose.</p>
+
+<hr/>
+
+<h2>Sources</h2>
+
+<p>Everything in this post comes from the public sources below, checked in September 2026. Incident details come from the vendor advisories and the original researchers where those exist, and from named reporting where they do not.</p>
+
+<h3>Starting point</h3>
+
+<ul>
+<li><a href="https://solutions.opentext.com/cybersecurity/application-security/">OpenText &mdash; Application Security solutions page</a>. The vendor page this post responds to: Fortify product claims, the OWASP LLM Top 10 coverage claim, and the 70% mean-time-to-remediate figure.</li>
+</ul>
+
+<h3>OWASP frameworks</h3>
+
+<ul>
+<li><a href="https://genai.owasp.org/llm-top-10/">OWASP Top 10 for LLM Applications 2025</a>. The current LLM01&ndash;LLM10 list used in the comparison table and the figure.</li>
+
+<li><a href="https://genai.owasp.org/2025/12/09/owasp-top-10-for-agentic-applications-the-benchmark-for-agentic-security-in-the-age-of-autonomous-ai/">OWASP Top 10 for Agentic Applications</a> (OWASP GenAI Security Project, 9 December 2025). The ASI01&ndash;ASI10 list and OWASP&rsquo;s mapping of incidents to entries.</li>
+</ul>
+
+<h3>Design principles and defenses</h3>
+
+<ul>
+<li><a href="https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/">Simon Willison &mdash; The lethal trifecta for AI agents</a> (16 June 2025).</li>
+
+<li><a href="https://ai.meta.com/blog/practical-ai-agent-security/">Meta AI &mdash; Agents Rule of Two: A Practical Approach to AI Agent Security</a> (October 2025).</li>
+
+<li><a href="https://arxiv.org/abs/2503.18813">Debenedetti et al. &mdash; Defeating Prompt Injections by Design</a> (CaMeL, arXiv:2503.18813), with <a href="https://github.com/google-research/camel-prompt-injection">the released code</a>. Source of the 77% vs 84% AgentDojo figures.</li>
+</ul>
+
+<h3>Incidents</h3>
+
+<ul>
+<li><strong>EchoLeak:</strong> <a href="https://msrc.microsoft.com/update-guide/vulnerability/CVE-2025-32711">Microsoft Security Response Center, CVE-2025-32711</a>, and <a href="https://socprime.com/blog/cve-2025-32711-zero-click-ai-vulnerability/">SOC Prime&rsquo;s summary of Aim Security&rsquo;s disclosure</a>.</li>
+
+<li><strong>MCP tool poisoning:</strong> <a href="https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks">Invariant Labs &mdash; MCP Security Notification: Tool Poisoning Attacks</a> (April 2025).</li>
+
+<li><strong>GitHub MCP exploit:</strong> <a href="https://invariantlabs.ai/blog/mcp-github-vulnerability">Invariant Labs &mdash; GitHub MCP Exploited: Accessing private repositories via MCP</a> (May 2025).</li>
+
+<li><strong>Amazon Q Developer extension:</strong> <a href="https://aws.amazon.com/security/security-bulletins/AWS-2025-015/">AWS Security Bulletin AWS-2025-015</a> and the <a href="https://github.com/aws/aws-toolkit-vscode/security/advisories/GHSA-7g7f-ff96-5gcw">GitHub security advisory GHSA-7g7f-ff96-5gcw</a>.</li>
+
+<li><strong>s1ngularity (Nx):</strong> <a href="https://www.wiz.io/blog/s1ngularity-supply-chain-attack">Wiz &mdash; s1ngularity: supply chain attack leaks secrets on GitHub</a> (August 2025).</li>
+
+<li><strong>Gemini memory attack:</strong> <a href="https://embracethered.com/blog/posts/2025/gemini-memory-persistence-prompt-injection/">Johann Rehberger &mdash; Hacking Gemini&rsquo;s Memory with Prompt Injection and Delayed Tool Invocation</a> (February 2025).</li>
+
+<li><strong>Replit database deletion:</strong> The Register&rsquo;s <a href="https://www.theregister.com/2025/07/21/replit_saastr_vibe_coding_incident/">incident report</a> and <a href="https://www.theregister.com/2025/07/22/replit_saastr_response/">Replit&rsquo;s response</a>, plus <a href="https://incidentdatabase.ai/cite/1152/">AI Incident Database entry 1152</a>.</li>
+</ul>
+
+<h3>Earlier posts on this blog</h3>
+
+<ul>
+<li><a href="https://sandeephalder.blog/2026/08/23/the-lethal-trifecta-why-capable-ai-agents-are-easy-to-turn-against-you/">The Lethal Trifecta: Why Capable AI Agents Are Easy to Turn Against You</a></li>
+
+<li><a href="https://sandeephalder.blog/2026/08/23/designing-an-agentic-ai-platform-for-vulnerability-orchestration/">Designing an Agentic AI Platform for Vulnerability Orchestration</a></li>
+</ul>
